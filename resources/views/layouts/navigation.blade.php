@@ -131,6 +131,16 @@
         </div>
     </div>
 
+    {{-- Ajoutez ce code de débogage au début de la section Administration --}}
+@php
+    $user = auth()->user();
+    $roles = $user->roles ?? collect();
+    dump('User ID: ' . $user->id);
+    dump('User roles: ' . $roles->pluck('name')->implode(', '));
+    dump('Has super_admin role: ' . ($user->hasRole('super_admin') ? 'YES' : 'NO'));
+    dump('Has manage_roles permission: ' . ($user->hasPermission('manage_roles') ? 'YES' : 'NO'));
+@endphp
+
     {{-- Administration --}}
     <div>
         <div class="text-xs font-semibold leading-6 text-gray-400">ADMINISTRATION</div>

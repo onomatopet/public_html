@@ -9,7 +9,7 @@ use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Collection;
-
+use App\Traits\HasPermissions;
 /**
  * App\Models\User
  *
@@ -44,7 +44,6 @@ use Illuminate\Support\Collection;
  */
 class User extends Authenticatable
 {
-    use HasFactory, Notifiable;
 
     /**
      * The attributes that are mass assignable.

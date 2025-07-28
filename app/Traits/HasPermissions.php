@@ -33,6 +33,10 @@ trait HasPermissions
             'view_deletion_requests',
             'export_data',
             'view_backups',
+            // Nouvelles permissions pour l'administration
+            'view_users',
+            'manage_settings',
+            'view_logs',
         ];
 
         $superAdminPermissions = array_merge($adminPermissions, [
@@ -41,6 +45,10 @@ trait HasPermissions
             'force_delete',
             'restore_backups',
             'manage_all_deletion_requests',
+            // Permissions exclusives au super admin
+            'manage_roles',
+            'manage_permissions',
+            'manage_system_settings',
         ]);
 
         // Vérification basée sur le rôle
@@ -60,8 +68,13 @@ trait HasPermissions
      */
     public function hasRole(string $role): bool
     {
-        // Utiliser le champ 'role' de la table users
-        return $this->role === $role;
+        // Si l'utilisateur a une relation 'roles' (système complexe)
+        if (method_exists($this, 'roles') && $this->relationLoaded('roles')) {
+            return $this->roles->contains('name', $role);
+        }
+
+        // Sinon, utiliser le champ 'role' de la table users
+        return isset($this->role) && $this->role === $role;
     }
 
     /**
@@ -70,5 +83,21 @@ trait HasPermissions
     public function canAccessAdmin(): bool
     {
         return $this->hasPermission('access_admin');
+    }
+
+    /**
+     * Vérifie si l'utilisateur est super admin
+     */
+    public function isSuperAdmin(): bool
+    {
+        return $this->hasRole('super_admin');
+    }
+
+    /**
+     * Vérifie si l'utilisateur est admin (admin ou super_admin)
+     */
+    public function isAdmin(): bool
+    {
+        return $this->hasRole('admin') || $this->hasRole('super_admin');
     }
 }

@@ -128,7 +128,7 @@
                             Gérer le Workflow
                         </a>
 
-                        <form action="{{ route('admin.periods.startValidation') }}" method="POST" class="inline">
+                        <form action="{{ route('admin.periods.start-validation') }}" method="POST" class="inline">
                             @csrf
                             <input type="hidden" name="period" value="{{ $currentPeriod->period }}">
                             <button type="submit"

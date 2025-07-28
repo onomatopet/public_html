@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Auth;
 
 // Controllers Admin
 use App\Http\Controllers\Admin\PeriodController;
@@ -20,6 +21,7 @@ use App\Http\Controllers\Admin\WorkflowController;
 use App\Http\Controllers\Admin\AchatSessionController;
 use App\Http\Controllers\Admin\RolePermissionController;
 use App\Http\Controllers\Admin\PeriodResetController;
+use App\Http\Controllers\Admin\MLMCleaningController;
 
 // Commentez ou supprimez ces lignes si les contrôleurs n'existent pas encore
 // use App\Http\Controllers\Admin\ReportController;
@@ -37,7 +39,6 @@ use App\Http\Controllers\Distributor\DistributorPurchaseController;
 use App\Models\DeletionRequest;
 use App\Models\Distributeur;
 use App\Services\DeletionValidationService;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Http\Request;
 
 require __DIR__.'/auth.php';
@@ -62,28 +63,26 @@ Route::get('/', function () {
 Route::middleware('auth')->group(function () {
 
     // Dashboard principal avec redirection selon le rôle
-    Route::get('/dashboard', function () {
-        $user = Auth::user();
+    Route::middleware('auth')->group(function () {
+        Route::get('/dashboard', function () {
+            $user = Auth::user();
 
-        // Rediriger vers le dashboard admin si l'utilisateur a les permissions admin
-        // Remplacer hasPermission par hasRole ou la méthode appropriée
-        if (method_exists($user, 'hasPermission') && $user->hasPermission('access_admin')) {
-            return redirect()->route('admin.dashboard');
-        }
+            if (!$user instanceof \App\Models\User) {
+                return redirect()->route('login');
+            }
 
-        // Alternative si vous utilisez hasRole
-        if (method_exists($user, 'hasRole') && $user->hasRole('admin')) {
-            return redirect()->route('admin.dashboard');
-        }
+            // Maintenant PHP et Intelephense savent que $user est de type User
+            if ($user->hasPermission('access_admin')) {
+                return redirect()->route('admin.dashboard');
+            }
 
-        // Rediriger vers le dashboard distributeur si l'utilisateur est un distributeur
-        if ($user->distributeur) {
-            return redirect()->route('distributor.dashboard');
-        }
+            if ($user->distributeur) {
+                return redirect()->route('distributor.dashboard');
+            }
 
-        // Par défaut, afficher le dashboard basique
-        return view('dashboard');
-    })->middleware('verified')->name('dashboard');
+            return view('dashboard');
+        })->middleware('verified')->name('dashboard');
+    });
 
     // Profil utilisateur
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
@@ -334,6 +333,31 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
 
             Route::get('/dashboard/stats', [DashboardController::class, 'apiStats'])->name('dashboard.stats');
             Route::get('/dashboard/notifications', [DashboardController::class, 'apiNotifications'])->name('dashboard.notifications');
+        });
+
+        // ===== SYSTÈME DE NETTOYAGE MLM =====
+        Route::prefix('mlm-cleaning')->name('mlm-cleaning.')->group(function () {
+            // Dashboard principal
+            Route::get('/', [MLMCleaningController::class, 'index'])->name('index');
+
+            // Analyse
+            Route::post('/analyze', [MLMCleaningController::class, 'analyze'])->name('analyze');
+
+            // Preview et traitement
+            Route::get('/preview/{session}', [MLMCleaningController::class, 'preview'])->name('preview');
+            Route::post('/process/{session}', [MLMCleaningController::class, 'process'])->name('process');
+
+            // Rapport et téléchargement
+            Route::get('/report/{session}', [MLMCleaningController::class, 'report'])->name('report');
+            Route::get('/report/{session}/download/{format}', [MLMCleaningController::class, 'downloadReport'])->name('report.download');
+
+            // Rollback
+            Route::post('/rollback/{session}', [MLMCleaningController::class, 'rollback'])->name('rollback');
+
+            // API endpoints
+            Route::get('/progress/{session}', [MLMCleaningController::class, 'progress'])->name('progress');
+            Route::get('/anomaly/{anomaly}', [MLMCleaningController::class, 'anomalyDetails'])->name('anomaly.details');
+            Route::post('/anomaly/{anomaly}/fix', [MLMCleaningController::class, 'fixAnomaly'])->name('anomaly.fix');
         });
 
         // ===== ROUTES FUTURES (À IMPLÉMENTER) =====

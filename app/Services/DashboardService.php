@@ -242,9 +242,15 @@ class DashboardService
                    ->limit($limit)
                    ->get()
                    ->map(function($achat) {
+                       // Vérifier si le distributeur existe avant d'accéder à ses propriétés
+                       $distributeurName = 'N/A';
+                       if ($achat->distributeur) {
+                           $distributeurName = $achat->distributeur->nom_distributeur . ' ' . $achat->distributeur->pnom_distributeur;
+                       }
+
                        return [
                            'id' => $achat->id,
-                           'distributeur' => $achat->distributeur->nom_distributeur . ' ' . $achat->distributeur->pnom_distributeur,
+                           'distributeur' => $distributeurName,
                            'product' => $achat->product->nom_produit ?? 'N/A',
                            'amount' => $achat->montant_total_ligne,
                            'points' => $achat->points_unitaire_achat * $achat->qt,
@@ -288,11 +294,18 @@ class DashboardService
                           ->limit($limit)
                           ->get()
                           ->map(function($dist) {
+                              // Vérifier si le parent existe avant d'accéder à ses propriétés
+                              $parrainName = 'Aucun';
+                              if ($dist->parent) {
+                                  $parrainName = $dist->parent->nom_distributeur . ' ' . $dist->parent->pnom_distributeur;
+                              }
+
                               return [
                                   'id' => $dist->id,
                                   'matricule' => $dist->distributeur_id,
                                   'name' => $dist->nom_distributeur . ' ' . $dist->pnom_distributeur,
-                                  'parrain' => $dist->parent ? $dist->parent->nom_distributeur . ' ' . $dist->parent->pnom_distributeur : 'N/A',
+                                  'parrain' => $parrainName,
+                                  'grade' => $dist->etoiles_id ?? 1,
                                   'created_at' => $dist->created_at
                               ];
                           })
