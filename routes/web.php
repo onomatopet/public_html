@@ -15,6 +15,7 @@ use App\Http\Controllers\Admin\ProductController;
 use App\Http\Controllers\Admin\AdminSnapshotController;
 use App\Http\Controllers\Admin\DeletionRequestController;
 use App\Http\Controllers\Admin\ModificationRequestController;
+use App\Http\Controllers\debugageController;
 use App\Http\Controllers\Admin\AchatReturnController;
 use App\Http\Controllers\Admin\NetworkExportController;
 use App\Http\Controllers\Admin\WorkflowController;
@@ -22,12 +23,13 @@ use App\Http\Controllers\Admin\AchatSessionController;
 use App\Http\Controllers\Admin\RolePermissionController;
 use App\Http\Controllers\Admin\PeriodResetController;
 use App\Http\Controllers\Admin\MLMCleaningController;
+use App\Http\Controllers\Admin\AdvancementHistoryController;
 
 // Commentez ou supprimez ces lignes si les contrôleurs n'existent pas encore
-// use App\Http\Controllers\Admin\ReportController;
-// use App\Http\Controllers\Admin\SettingsController;
-// use App\Http\Controllers\Admin\ImportExportController;
-// use App\Http\Controllers\Admin\ActivityLogController;
+use App\Http\Controllers\Admin\ReportController;
+use App\Http\Controllers\Admin\SettingsController;
+use App\Http\Controllers\Admin\ImportExportController;
+use App\Http\Controllers\Admin\ActivityLogController;
 
 // Controllers Distributor (à créer)
 use App\Http\Controllers\Distributor\DistributorDashboardController;
@@ -40,6 +42,7 @@ use App\Models\DeletionRequest;
 use App\Models\Distributeur;
 use App\Services\DeletionValidationService;
 use Illuminate\Http\Request;
+
 
 require __DIR__.'/auth.php';
 
@@ -121,8 +124,12 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
     ->name('admin.')
     ->group(function () {
 
-        // Dashboard principal - simplifié
+        // ===== ESPACE DE TESTE ET DE DEBOGAGE =====
         Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
+
+
+        // Dashboard principal - simplifié
+        Route::get('/debogage', [debugageController::class, 'show'])->name('debogage');
 
         // ===== DASHBOARD ET MONITORING =====
         Route::prefix('dashboard')->name('dashboard.')->group(function () {
@@ -143,6 +150,9 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::post('/create-snapshot', [WorkflowController::class, 'createSnapshot'])->name('create-snapshot');
             Route::post('/close-period', [WorkflowController::class, 'closePeriod'])->name('close-period');
             Route::get('/{period}/report', [WorkflowController::class, 'report'])->name('report');
+            Route::post('/calculate-bonus', [WorkflowController::class, 'calculateBonus'])->name('calculate-bonus');
+            Route::post('/reset-step', [WorkflowController::class, 'resetStep'])
+            ->name('reset-step'); // Ajustez selon vos permissions
         });
 
         // ===== GESTION DES DISTRIBUTEURS =====
@@ -221,8 +231,15 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::put('/{bonus}', [BonusController::class, 'update'])->name('update');
             Route::delete('/{bonus}', [BonusController::class, 'destroy'])->name('destroy');
             Route::get('/{bonus}/pdf', [BonusController::class, 'generatePdf'])->name('pdf');
+            Route::get('/{bonus}/imprimable', [BonusController::class, 'generateHtml'])->name('imprimable');
             Route::get('/calculate/{period}', [BonusController::class, 'showCalculation'])->name('calculate.show');
             Route::post('/calculate/{period}', [BonusController::class, 'calculate'])->name('calculate');
+        });
+
+        Route::prefix('admin')->name('admin.')->middleware('auth')->group(function () {
+            Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard.index');
+            Route::get('/dashboard/performance', [DashboardController::class, 'performance'])->name('dashboard.performance');
+            Route::get('/dashboard/export', [DashboardController::class, 'export'])->name('dashboard.export');
         });
 
         // ===== GESTION DES PÉRIODES (VERSION CONSOLIDÉE) =====
@@ -310,6 +327,43 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::post('/users/{user}/toggle-status', [RolePermissionController::class, 'toggleUserStatus'])->name('users.toggle-status');
         });
 
+        // ===== ROUTES MANQUANTES DANS DELETIONS =====
+        Route::prefix('deletions')->name('deletions.')->group(function () {
+            Route::get('/', [DeletionRequestController::class, 'index'])->name('index');
+            Route::get('/create', [DeletionRequestController::class, 'create'])->name('create');
+            Route::post('/', [DeletionRequestController::class, 'store'])->name('store');
+        });
+
+        // ===== ROUTES TEMPORAIRES POUR LES SECTIONS MANQUANTES =====
+
+        // RAPPORTS
+        Route::prefix('reports')->name('reports.')->group(function () {
+            Route::get('/', function () {
+                return view('admin.reports.index');
+            })->name('index');
+        });
+
+        // IMPORT/EXPORT
+        Route::prefix('import-export')->name('import-export.')->group(function () {
+            Route::get('/', function () {
+                return view('admin.import-export.index');
+            })->name('index');
+        });
+
+        // LOGS D'ACTIVITÉ
+        Route::prefix('logs')->name('logs.')->group(function () {
+            Route::get('/', function () {
+                return view('admin.logs.index');
+            })->name('index');
+        });
+
+        // PARAMÈTRES
+        Route::prefix('settings')->name('settings.')->group(function () {
+            Route::get('/', function () {
+                return view('admin.settings.index');
+            })->name('index');
+        });
+
         // ===== ROUTES API POUR AJAX =====
         Route::prefix('api')->name('api.')->group(function () {
             Route::get('/distributeurs/search', [DistributeurController::class, 'apiSearch'])->name('distributeurs.search');
@@ -360,9 +414,9 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::post('/anomaly/{anomaly}/fix', [MLMCleaningController::class, 'fixAnomaly'])->name('anomaly.fix');
         });
 
-        // ===== ROUTES FUTURES (À IMPLÉMENTER) =====
-        /*
-        // RAPPORTS
+        // ===== ROUTES ACTIVES =====
+
+        // RAPPORTS AVANCÉS
         Route::prefix('reports')->name('reports.')->group(function () {
             Route::get('/', [ReportController::class, 'index'])->name('index');
             Route::get('/sales', [ReportController::class, 'sales'])->name('sales');
@@ -371,14 +425,14 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::post('/export', [ReportController::class, 'export'])->name('export');
         });
 
-        // PARAMÈTRES
+        // PARAMÈTRES AVANCÉS
         Route::prefix('settings')->name('settings.')->group(function () {
             Route::get('/', [SettingsController::class, 'index'])->name('index');
             Route::post('/update', [SettingsController::class, 'update'])->name('update');
             Route::post('/cache/clear', [SettingsController::class, 'clearCache'])->name('cache.clear');
         });
 
-        // IMPORT/EXPORT
+        // IMPORT/EXPORT AVANCÉ
         Route::prefix('import-export')->name('import-export.')->group(function () {
             Route::get('/', [ImportExportController::class, 'index'])->name('index');
             Route::post('/import', [ImportExportController::class, 'import'])->name('import');
@@ -386,18 +440,17 @@ Route::middleware(['auth', 'verified', 'check_admin_role'])
             Route::get('/download/{file}', [ImportExportController::class, 'download'])->name('download');
         });
 
-        // LOGS D'ACTIVITÉ
+        Route::prefix('avancements')->name('avancements.')->group(function () {
+            Route::get('/', [AdvancementHistoryController::class, 'index'])->name('index');
+            Route::get('/statistics', [AdvancementHistoryController::class, 'statistics'])->name('statistics');
+            Route::get('/export', [AdvancementHistoryController::class, 'export'])->name('export');
+            Route::get('/{id}', [AdvancementHistoryController::class, 'show'])->name('show');
+        });
+
+        // LOGS D'ACTIVITÉ AVANCÉS
         Route::prefix('logs')->name('logs.')->group(function () {
             Route::get('/', [ActivityLogController::class, 'index'])->name('index');
             Route::get('/{log}', [ActivityLogController::class, 'show'])->name('show');
-        });
-        */
-
-        // ===== ROUTES MANQUANTES DANS DELETIONS =====
-        Route::prefix('deletions')->name('deletions.')->group(function () {
-            Route::get('/', [DeletionRequestController::class, 'index'])->name('index');
-            Route::get('/create', [DeletionRequestController::class, 'create'])->name('create');
-            Route::post('/', [DeletionRequestController::class, 'store'])->name('store');
         });
     });
 

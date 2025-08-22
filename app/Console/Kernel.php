@@ -10,6 +10,9 @@ use Illuminate\Support\Facades\DB;
 
 class Kernel extends ConsoleKernel
 {
+    protected $commands = [
+        Commands\FinalizeSetup::class,
+    ];
     /**
      * Define the application's command schedule.
      */

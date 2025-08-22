@@ -3,12 +3,15 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
-use App\Models\LevelCurrent; // Changé de LevelCurrentTest
+use App\Models\LevelCurrent;
 use App\Models\Distributeur;
+use App\Models\AvancementHistory;
+use App\Models\TempGradeCalculation;
 use App\Services\EternalHelperLegacyMatriculeDB;
-use App\Services\GradeCalculator;
+use App\Services\DistributorLineageServiceAdapter;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class ProcessAllDistributorAdvancements extends Command
 {
@@ -19,18 +22,27 @@ class ProcessAllDistributorAdvancements extends Command
                                                     {--batch-size=1000 : Process distributors in batches}
                                                     {--dry-run : Show what would be changed without applying}
                                                     {--validated-only : Process only distributors who have made purchases in the period}
-                                                    {--export= : Export promotions to CSV file}';
+                                                    {--export= : Export promotions to CSV file}
+                                                    {--show-details : Show detailed eligibility information}
+                                                    {--limit= : Limit the number of distributors to process (for testing)}
+                                                    {--min-grade= : Process only distributors with minimum grade}
+                                                    {--max-grade= : Process only distributors with maximum grade}
+                                                    {--keep-temp : Keep temporary calculation table after processing}';
 
-    protected $description = 'Calculates and applies grade advancements for all distributors iteratively, with optimizations.';
+    protected $description = 'Calculates and applies grade advancements for all distributors iteratively using new business rules with temporary calculation table.';
 
     private EternalHelperLegacyMatriculeDB $branchQualifier;
-    private GradeCalculator $gradeCalculator;
+    private DistributorLineageServiceAdapter $lineageService;
+    private string $calculationSessionId;
 
-    public function __construct(EternalHelperLegacyMatriculeDB $branchQualifier, GradeCalculator $gradeCalculator)
+    public function __construct(
+        EternalHelperLegacyMatriculeDB $branchQualifier,
+        DistributorLineageServiceAdapter $lineageService
+    )
     {
         parent::__construct();
         $this->branchQualifier = $branchQualifier;
-        $this->gradeCalculator = $gradeCalculator;
+        $this->lineageService = $lineageService;
     }
 
     public function handle(): int
@@ -40,12 +52,12 @@ class ProcessAllDistributorAdvancements extends Command
         if ($matriculeToDebug) {
             return $this->handleSingleDistributorDebug($matriculeToDebug);
         } else {
-            return $this->handleBatchProcessingOptimized();
+            return $this->handleBatchProcessingWithTempTable();
         }
     }
 
     /**
-     * Gère le flux d'analyse pour un seul distributeur.
+     * Gère le flux d'analyse pour un seul distributeur (mode debug)
      */
     private function handleSingleDistributorDebug(string $matricule): int
     {
@@ -58,82 +70,82 @@ class ProcessAllDistributorAdvancements extends Command
         $this->info("--- DEBUG MODE for Matricule <fg=yellow>{$matricule}</> for Period <fg=yellow>{$period}</> ---");
 
         try {
-            $this->line('Pre-loading all distributor data...');
-            $this->branchQualifier->loadAndBuildMaps();
-        } catch (\Exception $e) {
-             $this->error("CRITICAL ERROR during data loading: " . $e->getMessage());
-             return self::FAILURE;
-        }
+            // Utiliser le service sans table temporaire pour le debug
+            $eligibility = $this->lineageService->checkGradeEligibility($matricule, $period, [
+                'include_details' => true,
+                'stop_on_first_failure' => false,
+                'check_all_possible' => true
+            ]);
 
-        // CORRECTION : Chercher par matricule dans la table distributeurs, puis récupérer l'ID
-        $distributeur = Distributeur::where('distributeur_id', $matricule)->first();
-        if (!$distributeur) {
-            $this->error("No distributor found with matricule {$matricule}.");
-            return self::FAILURE;
-        }
-
-        $levelEntry = LevelCurrent::where('distributeur_id', $distributeur->id) // Utiliser l'ID, pas le matricule
-                                  ->where('period', $period)
-                                  ->first();
-
-        if (!$levelEntry) {
-            $this->error("No LevelCurrent entry found for matricule {$matricule} (ID: {$distributeur->id}) in period {$period}.");
-            return self::FAILURE;
-        }
-
-        $this->info("Distributor found. Current Grade: <fg=cyan>{$levelEntry->etoiles}</>");
-        $this->table(
-            ['Metric', 'Value'],
-            [
-                ['Matricule', $matricule],
-                ['Internal ID', $distributeur->id],
-                ['Current Grade (Etoiles)', $levelEntry->etoiles],
-                ['Cumulative Individual', number_format($levelEntry->cumul_individuel)],
-                ['Cumulative Collective', number_format($levelEntry->cumul_collectif)],
-            ]
-        );
-
-        $this->line("\nCalculating potential grade...");
-
-        // Calcul itératif pour ce distributeur
-        $currentGrade = $levelEntry->etoiles;
-        $iterations = 0;
-        $maxIterations = 10;
-
-        while ($iterations < $maxIterations) {
-            $newPotentialLevel = $this->gradeCalculator->calculatePotentialGrade(
-                $currentGrade,
-                (float)$levelEntry->cumul_individuel,
-                (float)$levelEntry->cumul_collectif,
-                $matricule, // Le service utilise probablement encore le matricule
-                $this->branchQualifier
-            );
-
-            if ($newPotentialLevel <= $currentGrade) {
-                break;
+            if (isset($eligibility['error'])) {
+                $this->error($eligibility['error']);
+                return self::FAILURE;
             }
 
-            $this->info("Iteration {$iterations}: Grade {$currentGrade} → {$newPotentialLevel}");
-            $currentGrade = $newPotentialLevel;
-            $iterations++;
-        }
+            // Afficher les informations actuelles
+            $this->info("Distributor found: <fg=cyan>{$eligibility['distributor']['nom']} {$eligibility['distributor']['prenom']}</>");
+            $this->table(
+                ['Metric', 'Value'],
+                [
+                    ['Matricule', $eligibility['distributor']['matricule']],
+                    ['Internal ID', $eligibility['distributor']['id']],
+                    ['Current Grade', $eligibility['distributor']['current_grade']],
+                    ['Cumul Individuel', number_format($eligibility['distributor']['cumul_individuel'], 2)],
+                    ['Cumul Collectif', number_format($eligibility['distributor']['cumul_collectif'], 2)],
+                ]
+            );
 
-        $this->line("\n--- DEBUG RESULT ---");
-        if ($currentGrade > $levelEntry->etoiles) {
-            $this->info("Final Calculated Grade: <fg=green>{$currentGrade}</>");
-            $this->info("Conclusion: This distributor SHOULD BE PROMOTED from {$levelEntry->etoiles} to {$currentGrade}.");
-        } else {
-            $this->info("Final Calculated Grade: <fg=yellow>{$currentGrade}</>");
-            $this->info("Conclusion: This distributor should be maintained at their current grade.");
+            // Afficher l'analyse d'éligibilité
+            $this->line("\n--- ELIGIBILITY ANALYSIS ---");
+
+            if ($eligibility['can_advance']) {
+                $this->info("✓ Eligible for advancement to grade <fg=green>{$eligibility['max_achievable_grade']}</>");
+
+                // Afficher les détails de qualification
+                foreach ($eligibility['eligibilities'] as $grade => $details) {
+                    if (isset($details['skipped'])) {
+                        $this->line("\nGrade {$grade}: <fg=gray>SKIPPED</> (previous grade failed)");
+                        continue;
+                    }
+
+                    if ($details['eligible']) {
+                        $this->line("\nGrade {$grade}: <fg=green>ELIGIBLE</>");
+                        foreach ($details['qualified_options'] as $option) {
+                            $this->info("  ✓ Qualified by: {$option['description']}");
+                        }
+                    } else {
+                        $this->line("\nGrade {$grade}: <fg=red>NOT ELIGIBLE</>");
+                        if ($this->option('show-details') && isset($details['all_options'])) {
+                            foreach ($details['all_options'] as $option) {
+                                $this->warn("  Option {$option['option']}: {$option['description']}");
+                                if (isset($option['status'])) {
+                                    foreach ($option['status'] as $req) {
+                                        $status = $req['met'] ? '✓' : '✗';
+                                        $color = $req['met'] ? 'green' : 'red';
+                                        $this->line("    [{$status}] {$req['requirement']}: <fg={$color}>{$req['actual']}/{$req['required']}</>");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                $this->warn("✗ Not eligible for any advancement");
+            }
+
+        } catch (\Exception $e) {
+            $this->error("Error during analysis: " . $e->getMessage());
+            Log::error("Debug mode error", ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return self::FAILURE;
         }
 
         return self::SUCCESS;
     }
 
     /**
-     * Version optimisée du traitement par lot
+     * Traitement par lot avec table temporaire
      */
-    private function handleBatchProcessingOptimized(): int
+    private function handleBatchProcessingWithTempTable(): int
     {
         $period = $this->argument('period') ?? date('Y-m');
         $validatedOnly = $this->option('validated-only');
@@ -143,70 +155,76 @@ class ProcessAllDistributorAdvancements extends Command
             return self::FAILURE;
         }
 
-        $this->info("Starting OPTIMIZED iterative advancement process for period: <fg=yellow>{$period}</>");
+        $this->info("Starting advancement process for period: <fg=yellow>{$period}</> using temporary calculation table");
 
         if ($validatedOnly) {
-            $this->info("🛒 <fg=cyan>VALIDATED-ONLY MODE:</fg> Processing only distributors with purchases in period {$period}");
+            $this->info("🛒 <fg=cyan>VALIDATED-ONLY MODE:</fg> Processing only distributors with validated purchases");
         }
 
         if ($this->option('dry-run')) {
-            $this->warn('⚠️  <fg=yellow>DRY RUN MODE:</fg> No database changes will be applied');
+            $this->warn('⚠️  <fg=yellow>DRY RUN MODE:</fg> No changes will be applied to main tables');
         }
 
         if (!$this->option('force') && !$this->option('dry-run') &&
-            !$this->confirm("This will update distributor grades for period {$period}. Continue?", false)) {
+            !$this->confirm("This will calculate distributor grade advancements for period {$period}. Continue?", false)) {
             $this->comment('Operation cancelled.');
             return self::FAILURE;
         }
 
+        // Générer un ID de session unique
+        $this->calculationSessionId = 'CALC_' . date('YmdHis') . '_' . Str::random(8);
+        $this->info("Calculation session ID: <fg=cyan>{$this->calculationSessionId}</>");
+
         try {
-            // 1. Charger toutes les données
-            $startTime = microtime(true);
-            $this->line('Loading and organizing all data...');
+            // 1. Initialiser (juste la structure, pas de données)
+            $this->initializeTempTable($period);
 
-            $this->branchQualifier->loadAndBuildMaps();
+            // 2. Configurer le service pour utiliser la table temporaire
+            $this->lineageService->setCalculationSession($this->calculationSessionId);
 
-            // Charger les données avec tri par hiérarchie ET filtrage optionnel
-            $levelData = $this->loadDataWithHierarchy($period, $validatedOnly);
+            // 3. Traiter les avancements
+            $totalPromotions = $this->processAdvancementsIteratively($period);
 
-            if ($levelData->isEmpty()) {
-                $this->warn("No data found for period {$period}" . ($validatedOnly ? " with validated purchases" : "") . ".");
-                return self::SUCCESS;
-            }
+            // 4. Afficher les résultats
+            $this->displayResults($totalPromotions);
 
-            $loadTime = round(microtime(true) - $startTime, 2);
-            $this->info("Loaded {$levelData->count()} distributors in {$loadTime}s" . ($validatedOnly ? " (validated purchases only)" : ""));
-
-            // 2. Traitement optimisé
-            $allPromotions = $this->processPromotionsOptimized($levelData);
-
-            // 3. Afficher les résultats
-            $this->displayPromotions($allPromotions);
-
+            // 5. Exporter si demandé
             if ($export = $this->option('export')) {
-                $this->exportPromotions($allPromotions, $export);
+                $this->exportResults($export);
             }
 
-            if ($this->option('dry-run')) {
-                $this->info("\nDRY RUN: No changes applied to database.");
-                return self::SUCCESS;
+            // 6. Appliquer les changements si pas en dry-run
+            if (!$this->option('dry-run')) {
+                if ($totalPromotions === 0) {
+                    $this->info("No promotions to apply.");
+                } else {
+                    if ($this->option('force') || $this->confirm("Apply {$totalPromotions} promotions to main tables?", true)) {
+                        $this->applyPromotionsFromTemp($period);
+                    }
+                }
+            } else {
+                $this->info("\nDRY RUN completed. No changes applied to main tables.");
+                $this->info("Review the temporary data with session ID: {$this->calculationSessionId}");
             }
 
-            if ($allPromotions->isEmpty()) {
-                $this->info("No promotions to apply.");
-                return self::SUCCESS;
+            // 7. Nettoyer la table temporaire (sauf si --keep-temp)
+            if (!$this->option('keep-temp') && !$this->option('dry-run')) {
+                $this->cleanupTempTable();
+            } else {
+                $this->info("\nTemporary data kept in table with session ID: {$this->calculationSessionId}");
             }
-
-            if (!$this->option('force') && !$this->confirm("Apply {$allPromotions->count()} promotions?", true)) {
-                return self::SUCCESS;
-            }
-
-            // 4. Appliquer les changements
-            $this->applyPromotions($allPromotions, $period);
 
         } catch (\Exception $e) {
             $this->error("Error: " . $e->getMessage());
-            Log::error("Advancement process failed", ['error' => $e]);
+            Log::error("Advancement process failed", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'session_id' => $this->calculationSessionId
+            ]);
+
+            // Nettoyer en cas d'erreur
+            $this->cleanupTempTable();
+
             return self::FAILURE;
         }
 
@@ -214,348 +232,317 @@ class ProcessAllDistributorAdvancements extends Command
     }
 
     /**
-     * Charge les données avec information de hiérarchie et filtrage optionnel
-     * CORRECTION MAJEURE : Adaptation aux nouvelles structures ID/matricule
+     * Initialise la table temporaire UNIQUEMENT avec la structure (pas de données)
      */
-    private function loadDataWithHierarchy(string $period, bool $validatedOnly = false)
+    private function initializeTempTable(string $period): void
     {
-        // CORRECTION : Utiliser la bonne table et les bonnes relations
-        $query = DB::table('level_currents as l') // Changé de level_current_test
-            ->join('distributeurs as d', 'l.distributeur_id', '=', 'd.id') // CORRECTION : l.distributeur_id (ID) = d.id (ID)
-            ->where('l.period', $period);
+        $this->info("Initializing temporary calculation table structure...");
 
-        if ($validatedOnly) {
-            // CORRECTION : Jointure correcte avec achats (utiliser les IDs, pas les matricules)
-            $query->join('achats as a', function($join) use ($period) {
-                $join->on('d.id', '=', 'a.distributeur_id') // CORRECTION : Les deux sont des IDs maintenant
-                     ->where('a.period', '=', $period); // CORRECTION : Utiliser = au lieu de where pour éviter les erreurs SQL
-            });
+        // Vérifier que la période existe
+        $count = DB::table('level_currents')
+            ->where('period', $period)
+            ->count();
 
-            // Grouper pour éviter les doublons (un distributeur peut avoir plusieurs achats)
-            $query->groupBy('l.distributeur_id', 'l.etoiles', 'l.cumul_individuel', 'l.cumul_collectif', 'd.id_distrib_parent', 'd.distributeur_id');
+        if ($count === 0) {
+            throw new \Exception("No data found for period {$period}");
         }
 
-        return $query->select(
-                'l.distributeur_id as internal_id', // ID interne pour les calculs
-                'd.distributeur_id as matricule',   // Matricule pour les services legacy
-                'l.etoiles',
-                'l.cumul_individuel',
-                'l.cumul_collectif',
-                'd.id_distrib_parent'
-            )
-            ->get()
-            ->keyBy('matricule'); // CORRECTION : Indexer par matricule pour compatibilité avec les services
+        $this->info("Ready to process {$count} distributors from level_currents");
+
+        // La table temporaire est vide au départ, on n'insère que les promotions
     }
 
     /**
-     * Traitement optimisé des promotions
-     * CORRECTION : Adapter aux nouvelles structures de données
+     * Traite les avancements de manière itérative
      */
-    private function processPromotionsOptimized($levelData)
+    private function processAdvancementsIteratively(string $period): int
     {
-        $allPromotions = collect();
         $maxIterations = (int) $this->option('max-iterations');
-        $passCounter = 0;
+        $batchSize = (int) $this->option('batch-size');
+        $passNumber = 0;
+        $totalPromotions = 0;
 
-        // Créer un ordre de traitement optimal (feuilles vers racines)
-        $processingOrder = $this->createOptimalProcessingOrder($levelData);
-
-        $this->info("Starting iterative calculation with optimized order...");
+        $this->info("\nStarting iterative advancement calculation...");
 
         do {
-            $promotionsInThisPass = collect();
-            $passCounter++;
+            $passNumber++;
+            $promotionsInThisPass = 0;
 
-            $this->info("--- Pass #{$passCounter} ---");
-            $progressBar = $this->output->createProgressBar(count($processingOrder));
-            $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %message%');
+            $this->info("\n--- Pass #{$passNumber} ---");
+
+            // Récupérer tous les distributeurs de la session
+            $distributors = TempGradeCalculation::forSession($this->calculationSessionId)
+                ->orderBy('grade_actuel') // Traiter d'abord les grades les plus bas
+                ->get();
+
+            $progressBar = $this->output->createProgressBar($distributors->count());
+            $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% | %elapsed:6s% | %message%');
             $progressBar->start();
 
-            // Traiter dans l'ordre optimal
-            foreach ($processingOrder as $matricule) {
-                if (!isset($levelData[$matricule])) continue;
+            // Traiter par batches
+            foreach ($distributors->chunk($batchSize) as $batch) {
+                foreach ($batch as $tempCalc) {
+                    $progressBar->setMessage("Checking {$tempCalc->matricule} (Grade {$tempCalc->grade_actuel})");
 
-                $levelEntry = $levelData[$matricule];
-                $currentGrade = $allPromotions->has($matricule)
-                    ? $allPromotions[$matricule]['to']
-                    : $levelEntry->etoiles;
+                    // Skip si déjà au grade max
+                    if ($tempCalc->grade_actuel >= 11) {
+                        $progressBar->advance();
+                        continue;
+                    }
 
-                $progressBar->setMessage("Checking {$matricule} (Grade {$currentGrade})");
+                    // Vérifier l'éligibilité
+                    $eligibility = $this->lineageService->checkGradeEligibility($tempCalc->matricule, $period, [
+                        'target_grade' => $tempCalc->grade_actuel + 1,
+                        'include_details' => true,
+                        'stop_on_first_failure' => true,
+                        'use_cache' => false
+                    ]);
 
-                // Calculer le nouveau grade potentiel
-                $newGrade = $this->calculateOptimalGrade(
-                    $matricule, // Utiliser le matricule pour les services
-                    $currentGrade,
-                    $levelEntry->cumul_individuel,
-                    $levelEntry->cumul_collectif
-                );
+                    if (!isset($eligibility['error']) && $eligibility['can_advance']) {
+                        $newGrade = $eligibility['max_achievable_grade'];
 
-                if ($newGrade > $currentGrade) {
-                    $promotionsInThisPass[$matricule] = [
-                        'internal_id' => $levelEntry->internal_id, // AJOUT : Stocker l'ID interne
-                        'matricule' => $matricule,
-                        'from' => $levelEntry->etoiles,
-                        'to' => $newGrade,
-                        'pass' => $passCounter,
-                        'cumul_individuel' => $levelEntry->cumul_individuel,
-                        'cumul_collectif' => $levelEntry->cumul_collectif
-                    ];
+                        if ($newGrade > $tempCalc->grade_actuel) {
+                            // Obtenir la méthode de qualification
+                            $qualification = 'N/A';
+                            if (isset($eligibility['eligibilities'][$newGrade]['qualified_options'][0])) {
+                                $qualification = $eligibility['eligibilities'][$newGrade]['qualified_options'][0]['description'];
+                            }
 
-                    // Mettre à jour dans la map pour les calculs suivants
-                    $this->branchQualifier->updateNodeLevelInMap($matricule, $newGrade);
+                            // Mettre à jour dans la table temporaire
+                            $tempCalc->grade_precedent = $tempCalc->grade_actuel;
+                            $tempCalc->grade_actuel = $newGrade;
+                            $tempCalc->pass_number = $passNumber;
+                            $tempCalc->qualification_method = $qualification;
+                            $tempCalc->promoted = true;
 
-                    // Mettre à jour la collection globale
-                    $allPromotions[$matricule] = $promotionsInThisPass[$matricule];
+                            // Ajouter à l'historique
+                            $tempCalc->addPromotionToHistory(
+                                $tempCalc->grade_precedent,
+                                $newGrade,
+                                $passNumber,
+                                $qualification
+                            );
+
+                            $tempCalc->save();
+
+                            $promotionsInThisPass++;
+                            $totalPromotions++;
+                        }
+                    }
+
+                    $progressBar->advance();
                 }
-
-                $progressBar->advance();
             }
 
             $progressBar->finish();
             $this->newLine();
-            $this->info("Pass #{$passCounter}: {$promotionsInThisPass->count()} promotions");
+            $this->info("Pass #{$passNumber} completed: {$promotionsInThisPass} promotions found");
 
-            if ($passCounter >= $maxIterations) {
-                $this->warn("Maximum iterations reached. Stopping.");
+            // Vérifier si on doit continuer
+            if ($passNumber >= $maxIterations) {
+                $this->warn("Maximum iterations ({$maxIterations}) reached. Stopping.");
                 break;
             }
 
-        } while ($promotionsInThisPass->isNotEmpty());
-
-        $this->info("Stabilized after {$passCounter} passes.");
-
-        return $allPromotions;
-    }
-
-    /**
-     * Crée un ordre de traitement optimal (bottom-up)
-     */
-    private function createOptimalProcessingOrder($levelData): array
-    {
-        // Construire un graphe des dépendances
-        $children = [];
-        $depths = [];
-
-        foreach ($levelData as $matricule => $data) {
-            $parent = $data->id_distrib_parent;
-            if ($parent && $parent != 0) {
-                // CORRECTION : Trouver le matricule du parent à partir de son ID
-                $parentMatricule = null;
-                foreach ($levelData as $checkMatricule => $checkData) {
-                    if ($checkData->internal_id == $parent) {
-                        $parentMatricule = $checkMatricule;
-                        break;
-                    }
-                }
-
-                if ($parentMatricule) {
-                    if (!isset($children[$parentMatricule])) {
-                        $children[$parentMatricule] = [];
-                    }
-                    $children[$parentMatricule][] = $matricule;
-                }
-            }
-        }
-
-        // Calculer la profondeur de chaque nœud
-        $calculateDepth = function($matricule) use (&$calculateDepth, &$depths, $children) {
-            if (isset($depths[$matricule])) {
-                return $depths[$matricule];
-            }
-
-            $maxChildDepth = 0;
-            if (isset($children[$matricule])) {
-                foreach ($children[$matricule] as $child) {
-                    $maxChildDepth = max($maxChildDepth, $calculateDepth($child) + 1);
-                }
-            }
-
-            $depths[$matricule] = $maxChildDepth;
-            return $maxChildDepth;
-        };
-
-        foreach ($levelData as $matricule => $data) {
-            $calculateDepth($matricule);
-        }
-
-        // Trier par profondeur (feuilles en premier)
-        $order = array_keys($depths);
-        usort($order, function($a, $b) use ($depths) {
-            return $depths[$a] <=> $depths[$b];
-        });
-
-        return $order;
-    }
-
-    /**
-     * Calcule le grade optimal avec optimisations
-     */
-    private function calculateOptimalGrade($matricule, $currentGrade, $cumulInd, $cumulCol): int
-    {
-        // Calcul itératif jusqu'à stabilisation
-        $calculatedGrade = $currentGrade;
-        $iterations = 0;
-        $maxIterations = 5; // Limite pour éviter les boucles infinies
-
-        while ($iterations < $maxIterations) {
-            $newGrade = $this->gradeCalculator->calculatePotentialGrade(
-                $calculatedGrade,
-                (float)$cumulInd,
-                (float)$cumulCol,
-                $matricule, // Utiliser le matricule pour les services legacy
-                $this->branchQualifier
-            );
-
-            if ($newGrade <= $calculatedGrade) {
+            if ($promotionsInThisPass === 0) {
+                $this->info("No more promotions found. Process stabilized.");
                 break;
             }
 
-            $calculatedGrade = $newGrade;
-            $iterations++;
-        }
+        } while (true);
 
-        return $calculatedGrade;
+        $this->info("\nCalculation completed after {$passNumber} passes.");
+        $this->info("Total promotions found: {$totalPromotions}");
+
+        return $totalPromotions;
     }
 
     /**
-     * Affiche les promotions
+     * Affiche les résultats depuis la table temporaire
      */
-    private function displayPromotions($promotions): void
+    private function displayResults(int $totalPromotions): void
     {
-        if ($promotions->isEmpty()) {
+        if ($totalPromotions === 0) {
             $this->info("\nNo promotions detected.");
             return;
         }
 
         $this->info("\n=== PROMOTIONS SUMMARY ===");
-        $this->info("Total promotions: " . $promotions->count());
 
-        // Grouper par pass
-        $byPass = $promotions->groupBy('pass');
-        foreach ($byPass as $pass => $passPromotions) {
-            $this->info("Pass #{$pass}: " . $passPromotions->count() . " promotions");
-        }
-
-        // Statistiques par changement de grade
-        $this->info("\n=== PROMOTIONS BY GRADE CHANGE ===");
-        $byChange = [];
-        foreach ($promotions as $matricule => $promo) {
-            $key = "{$promo['from']} → {$promo['to']}";
-            if (!isset($byChange[$key])) {
-                $byChange[$key] = 0;
-            }
-            $byChange[$key]++;
-        }
-
-        arsort($byChange);
+        // Résumé par grade de destination
+        $byGrade = TempGradeCalculation::forSession($this->calculationSessionId)
+            ->where('promoted', true)
+            ->selectRaw('grade_actuel as grade, COUNT(*) as count')
+            ->groupBy('grade_actuel')
+            ->orderBy('grade_actuel')
+            ->get();
 
         $this->table(
-            ['Grade Change', 'Count'],
-            collect($byChange)->map(fn($count, $change) => [$change, $count])->take(10)->all()
+            ['To Grade', 'Count'],
+            $byGrade->map(function($row) {
+                return [$row->grade, $row->count];
+            })
         );
 
-        // Afficher quelques exemples
-        $this->info("\n=== SAMPLE PROMOTIONS ===");
+        // Résumé par passe
+        $byPass = TempGradeCalculation::forSession($this->calculationSessionId)
+            ->where('promoted', true)
+            ->selectRaw('pass_number, COUNT(*) as count')
+            ->groupBy('pass_number')
+            ->orderBy('pass_number')
+            ->get();
+
+        $this->info("\n=== PROMOTIONS BY PASS ===");
         $this->table(
-            ['Matricule', 'From', 'To', 'Pass', 'Cumul Ind.', 'Cumul Col.'],
-            $promotions->take(20)->map(fn($p, $m) => [
-                $m,
-                $p['from'],
-                $p['to'],
-                $p['pass'],
-                number_format($p['cumul_individuel']),
-                number_format($p['cumul_collectif'])
-            ])->all()
+            ['Pass', 'Count'],
+            $byPass->map(function($row) {
+                return [$row->pass_number, $row->count];
+            })
         );
 
-        if ($promotions->count() > 20) {
-            $this->info("... and " . ($promotions->count() - 20) . " more promotions");
+        if ($this->option('show-details')) {
+            $this->info("\n=== DETAILED PROMOTIONS ===");
+
+            $promotions = TempGradeCalculation::forSession($this->calculationSessionId)
+                ->where('promoted', true)
+                ->with('distributeur')
+                ->orderBy('pass_number')
+                ->orderBy('grade_actuel', 'desc')
+                ->get();
+
+            $headers = ['Matricule', 'Name', 'Initial', 'Final', 'Passes', 'Last Method'];
+            $rows = $promotions->map(function($p) {
+                $passes = collect($p->promotion_history)->pluck('pass')->implode(',');
+                return [
+                    $p->matricule,
+                    $p->distributeur->nom_distributeur . ' ' . $p->distributeur->pnom_distributeur,
+                    $p->grade_initial,
+                    $p->grade_actuel,
+                    $passes,
+                    Str::limit($p->qualification_method ?? 'N/A', 40)
+                ];
+            });
+
+            $this->table($headers, $rows);
         }
     }
 
     /**
-     * Exporte les promotions en CSV
+     * Applique les promotions depuis la table temporaire vers les tables principales
      */
-    private function exportPromotions($promotions, $filename): void
+    private function applyPromotionsFromTemp(string $period): void
     {
-        $handle = fopen($filename, 'w');
+        $this->info("\nApplying promotions to main tables...");
 
-        fputcsv($handle, ['Matricule', 'From Grade', 'To Grade', 'Pass', 'Cumul Individuel', 'Cumul Collectif']);
+        $promotions = TempGradeCalculation::forSession($this->calculationSessionId)
+            ->where('promoted', true)
+            ->get();
 
-        foreach ($promotions as $matricule => $promo) {
-            fputcsv($handle, [
-                $matricule,
-                $promo['from'],
-                $promo['to'],
-                $promo['pass'],
-                $promo['cumul_individuel'],
-                $promo['cumul_collectif']
+        $progressBar = $this->output->createProgressBar($promotions->count());
+
+        DB::transaction(function() use ($promotions, $period, $progressBar) {
+            foreach ($promotions as $tempCalc) {
+                // 1. Mettre à jour table distributeurs
+                Distributeur::where('distributeur_id', $tempCalc->matricule)
+                          ->update(['etoiles_id' => $tempCalc->grade_actuel]);
+
+                // 2. Mettre à jour table level_currents
+                DB::table('level_currents')
+                    ->where('id', $tempCalc->level_current_id)
+                    ->update(['etoiles' => $tempCalc->grade_actuel]);
+
+                // 3. Créer entrées dans avancement_history pour chaque promotion
+                foreach ($tempCalc->promotion_history as $promo) {
+                    AvancementHistory::create([
+                        'distributeur_id' => $tempCalc->distributeur_id,
+                        'period' => $period,
+                        'ancien_grade' => $promo['from'],
+                        'nouveau_grade' => $promo['to'],
+                        'type_calcul' => $this->option('validated-only') ? 'validated_only' : 'all',
+                        'details' => json_encode([
+                            'matricule' => $tempCalc->matricule,
+                            'cumul_individuel' => $tempCalc->cumul_individuel,
+                            'cumul_collectif' => $tempCalc->cumul_collectif,
+                            'pass' => $promo['pass'],
+                            'qualification_method' => $promo['method'],
+                            'calculated_by' => 'ProcessAllDistributorAdvancements_v3',
+                            'calculation_session_id' => $this->calculationSessionId,
+                            'calculated_at' => $promo['timestamp']
+                        ])
+                    ]);
+                }
+
+                $progressBar->advance();
+            }
+        });
+
+        $progressBar->finish();
+        $this->newLine();
+        $this->info("All promotions applied successfully!");
+
+        // Log summary
+        Log::info("Advancements processed with temporary table", [
+            'period' => $period,
+            'session_id' => $this->calculationSessionId,
+            'total_promotions' => $promotions->count(),
+            'validated_only' => $this->option('validated-only')
+        ]);
+    }
+
+    /**
+     * Exporte les résultats
+     */
+    private function exportResults(string $filename): void
+    {
+        $csv = fopen($filename, 'w');
+
+        // Headers
+        fputcsv($csv, [
+            'Matricule',
+            'Nom',
+            'Grade Initial',
+            'Grade Final',
+            'Nombre de Promotions',
+            'Passes',
+            'Cumul Individuel',
+            'Cumul Collectif',
+            'Dernière Méthode de Qualification'
+        ]);
+
+        $promotions = TempGradeCalculation::forSession($this->calculationSessionId)
+            ->where('promoted', true)
+            ->with('distributeur')
+            ->get();
+
+        foreach ($promotions as $promo) {
+            $passes = collect($promo->promotion_history)->pluck('pass')->implode(',');
+
+            fputcsv($csv, [
+                $promo->matricule,
+                $promo->distributeur->nom_distributeur . ' ' . $promo->distributeur->pnom_distributeur,
+                $promo->grade_initial,
+                $promo->grade_actuel,
+                count($promo->promotion_history),
+                $passes,
+                $promo->cumul_individuel,
+                $promo->cumul_collectif,
+                $promo->qualification_method ?? 'N/A'
             ]);
         }
 
-        fclose($handle);
-        $this->info("Promotions exported to: {$filename}");
+        fclose($csv);
+        $this->info("Results exported to: {$filename}");
     }
 
     /**
-     * Applique les promotions en base de données
-     * CORRECTION MAJEURE : Utiliser les bons IDs/matricules pour les mises à jour
+     * Nettoie la table temporaire
      */
-    private function applyPromotions($promotions, $period): void
+    private function cleanupTempTable(): void
     {
-        $batchSize = (int) $this->option('batch-size');
+        $this->info("Cleaning up temporary data...");
 
-        $this->info("\nApplying promotions to database...");
-        $progressBar = $this->output->createProgressBar($promotions->count());
+        TempGradeCalculation::forSession($this->calculationSessionId)->delete();
 
-        DB::beginTransaction();
-        try {
-            $promotions->chunk($batchSize)->each(function($chunk) use ($period, &$progressBar) {
-                // Préparer les mises à jour batch
-                $distributeurUpdates = [];
-                $levelUpdates = [];
-
-                foreach ($chunk as $matricule => $promo) {
-                    // CORRECTION : Mise à jour distributeur par matricule
-                    $distributeurUpdates[] = [
-                        'distributeur_id' => $matricule, // Utiliser le matricule pour identifier
-                        'etoiles_id' => $promo['to']
-                    ];
-
-                    // CORRECTION : Mise à jour level_currents par ID interne
-                    $levelUpdates[] = [
-                        'distributeur_id' => $promo['internal_id'], // Utiliser l'ID interne
-                        'period' => $period,
-                        'etoiles' => $promo['to']
-                    ];
-
-                    $progressBar->advance();
-                }
-
-                // Batch update pour distributeurs (par matricule)
-                if (!empty($distributeurUpdates)) {
-                    foreach ($distributeurUpdates as $update) {
-                        Distributeur::where('distributeur_id', $update['distributeur_id'])
-                                  ->update(['etoiles_id' => $update['etoiles_id']]);
-                    }
-
-                    // Batch update pour level_currents (par ID)
-                    DB::table('level_currents')->upsert(
-                        $levelUpdates,
-                        ['distributeur_id', 'period'],
-                        ['etoiles']
-                    );
-                }
-            });
-
-            DB::commit();
-            $progressBar->finish();
-            $this->newLine();
-            $this->info("All promotions applied successfully!");
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            throw $e;
-        }
+        $this->info("Temporary data cleaned.");
     }
 }

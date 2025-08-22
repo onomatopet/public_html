@@ -5,15 +5,80 @@ namespace App\Services;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
+use ZipArchive;
 
 class BackupService
 {
+    protected string $backupPath;
+    protected array $excludedDirectories = [
+        'node_modules',
+        'vendor',
+        '.git',
+        'storage/framework/cache',
+        'storage/framework/sessions',
+        'storage/framework/views',
+        'storage/logs',
+        'storage/debugbar'
+    ];
+
+    public function __construct()
+    {
+        $this->backupPath = storage_path('app/backups');
+        $this->ensureBackupDirectoryExists();
+    }
+
     /**
-     * Crée un backup avant suppression
+     * S'assure que le répertoire de backup existe
      */
-    public function createBackup(string $entityType, int $entityId): array
+    protected function ensureBackupDirectoryExists(): void
+    {
+        if (!file_exists($this->backupPath)) {
+            mkdir($this->backupPath, 0755, true);
+        }
+
+        // Créer aussi les sous-dossiers pour les backups d'entités
+        $entityTypes = ['distributeur', 'product', 'achat', 'bonus'];
+        foreach ($entityTypes as $type) {
+            $path = $this->backupPath . '/' . $type;
+            if (!file_exists($path)) {
+                mkdir($path, 0755, true);
+            }
+        }
+    }
+
+    /**
+     * Crée un backup système (database/files/full)
+     * Utilisé par SettingsController
+     */
+    public function createBackup(string $type = 'full'): string
+    {
+        $timestamp = Carbon::now()->format('Y-m-d_His');
+        $filename = "backup_{$type}_{$timestamp}";
+
+        switch ($type) {
+            case 'database':
+                return $this->backupDatabase($filename);
+
+            case 'files':
+                return $this->backupFiles($filename);
+
+            case 'full':
+                return $this->backupFull($filename);
+
+            default:
+                throw new \InvalidArgumentException("Type de backup invalide: {$type}");
+        }
+    }
+
+    /**
+     * Crée un backup d'entité MLM
+     * Utilisé par DeletionRequestController
+     */
+    public function createEntityBackup(string $entityType, int $entityId): array
     {
         try {
             // Générer un ID unique pour le backup
@@ -41,14 +106,8 @@ class BackupService
             ];
 
             // Sauvegarder en JSON dans le dossier storage
-            $filename = "backups/{$entityType}/{$backupId}.json";
-            $fullPath = storage_path("app/{$filename}");
-
-            // Créer le répertoire si nécessaire
-            $directory = dirname($fullPath);
-            if (!file_exists($directory)) {
-                mkdir($directory, 0755, true);
-            }
+            $filename = "{$entityType}/{$backupId}.json";
+            $fullPath = $this->backupPath . '/' . $filename;
 
             // Écrire le fichier
             file_put_contents($fullPath, json_encode($backupData, JSON_PRETTY_PRINT));
@@ -94,6 +153,241 @@ class BackupService
     }
 
     /**
+     * Sauvegarde uniquement la base de données
+     */
+    protected function backupDatabase(string $filename): string
+    {
+        $filename .= '.sql';
+        $filepath = $this->backupPath . '/' . $filename;
+
+        try {
+            $database = config('database.connections.mysql.database');
+            $username = config('database.connections.mysql.username');
+            $password = config('database.connections.mysql.password');
+            $host = config('database.connections.mysql.host');
+            $port = config('database.connections.mysql.port', 3306);
+
+            // Commande mysqldump
+            $command = sprintf(
+                'mysqldump --single-transaction --routines --triggers --host=%s --port=%s --user=%s --password=%s %s > %s 2>&1',
+                escapeshellarg($host),
+                escapeshellarg($port),
+                escapeshellarg($username),
+                escapeshellarg($password),
+                escapeshellarg($database),
+                escapeshellarg($filepath)
+            );
+
+            exec($command, $output, $returnCode);
+
+            if ($returnCode !== 0) {
+                // Essayer une méthode alternative si mysqldump n'est pas disponible
+                return $this->backupDatabaseAlternative($filename);
+            }
+
+            // Compresser le fichier SQL
+            $this->compressFile($filepath);
+            unlink($filepath); // Supprimer le fichier non compressé
+
+            Log::info("Backup database créé: {$filename}.gz");
+            return $filename . '.gz';
+
+        } catch (\Exception $e) {
+            Log::error("Erreur backup database: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Méthode alternative pour backup database sans mysqldump
+     */
+    protected function backupDatabaseAlternative(string $filename): string
+    {
+        $filepath = $this->backupPath . '/' . $filename;
+        $sql = "-- Backup database alternative\n";
+        $sql .= "-- Generated on " . date('Y-m-d H:i:s') . "\n\n";
+
+        // Récupérer toutes les tables
+        $tables = DB::select('SHOW TABLES');
+        $dbName = config('database.connections.mysql.database');
+
+        foreach ($tables as $table) {
+            $tableName = $table->{"Tables_in_{$dbName}"};
+
+            // Structure de la table
+            $createTable = DB::select("SHOW CREATE TABLE `{$tableName}`")[0]->{"Create Table"};
+            $sql .= "DROP TABLE IF EXISTS `{$tableName}`;\n";
+            $sql .= $createTable . ";\n\n";
+
+            // Données de la table
+            $rows = DB::table($tableName)->get();
+            if ($rows->count() > 0) {
+                $sql .= "INSERT INTO `{$tableName}` VALUES\n";
+                $values = [];
+
+                foreach ($rows as $row) {
+                    $rowValues = [];
+                    foreach ($row as $value) {
+                        if ($value === null) {
+                            $rowValues[] = 'NULL';
+                        } elseif (is_numeric($value)) {
+                            $rowValues[] = $value;
+                        } else {
+                            $rowValues[] = "'" . addslashes($value) . "'";
+                        }
+                    }
+                    $values[] = '(' . implode(',', $rowValues) . ')';
+                }
+
+                $sql .= implode(",\n", $values) . ";\n\n";
+            }
+        }
+
+        file_put_contents($filepath, $sql);
+
+        // Compresser
+        $this->compressFile($filepath);
+        unlink($filepath);
+
+        return $filename . '.gz';
+    }
+
+    /**
+     * Sauvegarde uniquement les fichiers
+     */
+    protected function backupFiles(string $filename): string
+    {
+        $filename .= '.zip';
+        $filepath = $this->backupPath . '/' . $filename;
+
+        try {
+            $zip = new ZipArchive();
+
+            if ($zip->open($filepath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+                throw new \Exception("Impossible de créer l'archive ZIP");
+            }
+
+            // Ajouter les dossiers importants
+            $this->addDirectoryToZip($zip, base_path('app'), 'app');
+            $this->addDirectoryToZip($zip, base_path('config'), 'config');
+            $this->addDirectoryToZip($zip, base_path('database'), 'database');
+            $this->addDirectoryToZip($zip, base_path('resources'), 'resources');
+            $this->addDirectoryToZip($zip, base_path('routes'), 'routes');
+            $this->addDirectoryToZip($zip, storage_path('app'), 'storage/app', ['backups']);
+
+            // Ajouter les fichiers racine importants
+            $rootFiles = ['.env', 'composer.json', 'composer.lock', 'package.json'];
+            foreach ($rootFiles as $file) {
+                $path = base_path($file);
+                if (file_exists($path)) {
+                    $zip->addFile($path, $file);
+                }
+            }
+
+            $zip->close();
+
+            Log::info("Backup fichiers créé: {$filename}");
+            return $filename;
+
+        } catch (\Exception $e) {
+            Log::error("Erreur backup fichiers: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Sauvegarde complète (database + fichiers)
+     */
+    protected function backupFull(string $filename): string
+    {
+        try {
+            // Créer d'abord le backup de la base de données
+            $dbBackup = $this->backupDatabase($filename . '_db');
+
+            // Puis le backup des fichiers
+            $filesBackup = $this->backupFiles($filename . '_files');
+
+            // Créer une archive combinée
+            $fullBackupName = $filename . '_full.zip';
+            $fullBackupPath = $this->backupPath . '/' . $fullBackupName;
+
+            $zip = new ZipArchive();
+            if ($zip->open($fullBackupPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true) {
+                $zip->addFile($this->backupPath . '/' . $dbBackup, $dbBackup);
+                $zip->addFile($this->backupPath . '/' . $filesBackup, $filesBackup);
+                $zip->close();
+
+                // Supprimer les fichiers individuels
+                unlink($this->backupPath . '/' . $dbBackup);
+                unlink($this->backupPath . '/' . $filesBackup);
+            }
+
+            Log::info("Backup complet créé: {$fullBackupName}");
+            return $fullBackupName;
+
+        } catch (\Exception $e) {
+            Log::error("Erreur backup complet: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Compresse un fichier avec gzip
+     */
+    protected function compressFile(string $filepath): void
+    {
+        $data = file_get_contents($filepath);
+        $gzdata = gzencode($data, 9);
+        file_put_contents($filepath . '.gz', $gzdata);
+    }
+
+    /**
+     * Ajoute un répertoire à une archive ZIP
+     */
+    protected function addDirectoryToZip(ZipArchive $zip, string $directory, string $localPath = '', array $exclude = []): void
+    {
+        if (!is_dir($directory)) {
+            return;
+        }
+
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($iterator as $file) {
+            if ($file->isFile()) {
+                $filePath = $file->getRealPath();
+                $relativePath = str_replace($directory . '/', '', $filePath);
+
+                // Vérifier les exclusions
+                $shouldExclude = false;
+                foreach ($exclude as $excludePattern) {
+                    if (strpos($relativePath, $excludePattern) !== false) {
+                        $shouldExclude = true;
+                        break;
+                    }
+                }
+
+                // Vérifier aussi les répertoires exclus globalement
+                foreach ($this->excludedDirectories as $excludedDir) {
+                    if (strpos($filePath, $excludedDir) !== false) {
+                        $shouldExclude = true;
+                        break;
+                    }
+                }
+
+                if (!$shouldExclude) {
+                    $localName = $localPath ? $localPath . '/' . $relativePath : $relativePath;
+                    $zip->addFile($filePath, $localName);
+                }
+            }
+        }
+    }
+
+    // === MÉTHODES POUR LES BACKUPS D'ENTITÉS (depuis votre code existant) ===
+
+    /**
      * Restaure depuis un backup
      */
     public function restoreFromBackup(string $backupId): array
@@ -130,7 +424,7 @@ class BackupService
                 ->where('backup_id', $backupId)
                 ->update([
                     'restored_at' => now(),
-                    'restored_by' => Auth::id() ?: null, // Utiliser null au lieu de 0 pour éviter les erreurs FK
+                    'restored_by' => Auth::id() ?: null,
                     'updated_at' => now()
                 ]);
 
@@ -164,9 +458,11 @@ class BackupService
         }
     }
 
+    // ... (inclure toutes les autres méthodes de votre BackupService existant)
+    // getRelatedData, getEntityData, entityExists, mapOldColumnsToNew, etc.
+
     /**
      * Récupère les données liées à une entité
-     * VERSION CORRIGÉE : S'assure de récupérer TOUS les champs
      */
     private function getRelatedData(string $entityType, int $entityId): array
     {
@@ -177,7 +473,7 @@ class BackupService
                 // Récupérer les achats AVEC TOUS LES CHAMPS
                 $relatedData['achats'] = DB::table('achats')
                     ->where('distributeur_id', $entityId)
-                    ->select('*') // S'assurer de récupérer TOUS les champs
+                    ->select('*')
                     ->get()
                     ->map(function ($item) {
                         return (array) $item;
@@ -210,29 +506,9 @@ class BackupService
                     ->pluck('id')
                     ->toArray();
 
-                // Log pour vérification
-                Log::info("Données liées récupérées pour distributeur {$entityId}", [
-                    'achats_count' => count($relatedData['achats']),
-                    'bonuses_count' => count($relatedData['bonuses']),
-                    'levels_count' => count($relatedData['level_currents']),
-                    'children_count' => count($relatedData['children_ids'])
-                ]);
-
-                // Vérifier que les achats ont bien tous les champs requis
-                foreach ($relatedData['achats'] as $index => $achat) {
-                    $requiredFields = ['id', 'distributeur_id', 'products_id', 'period'];
-                    $missingFields = array_diff($requiredFields, array_keys($achat));
-                    if (!empty($missingFields)) {
-                        Log::warning("Achat {$index} manque des champs requis", [
-                            'achat_id' => $achat['id'] ?? 'unknown',
-                            'missing_fields' => $missingFields
-                        ]);
-                    }
-                }
                 break;
 
             case 'product':
-                // Récupérer les achats liés au produit AVEC TOUS LES CHAMPS
                 $relatedData['achats'] = DB::table('achats')
                     ->where('products_id', $entityId)
                     ->select('*')
@@ -244,7 +520,6 @@ class BackupService
                 break;
 
             case 'achat':
-                // Pour un achat, on peut vouloir sauvegarder les informations du distributeur et produit
                 $achat = DB::table('achats')->find($entityId);
                 if ($achat) {
                     $relatedData['distributeur'] = (array) DB::table('distributeurs')
@@ -310,8 +585,7 @@ class BackupService
     }
 
     /**
-     * Mapper les anciennes colonnes vers les nouvelles ET ajouter les champs requis manquants
-     * PUBLIC pour permettre l'utilisation dans les commandes si nécessaire
+     * Mapper les anciennes colonnes vers les nouvelles
      */
     public function mapOldColumnsToNew(string $entityType, array $entityData): array
     {
@@ -323,7 +597,6 @@ class BackupService
                     unset($entityData['montant']);
                 }
 
-                // La colonne 'points' doit être mappée vers 'points_unitaire_achat'
                 if (isset($entityData['points'])) {
                     if (!isset($entityData['points_unitaire_achat'])) {
                         $entityData['points_unitaire_achat'] = $entityData['points'];
@@ -331,16 +604,14 @@ class BackupService
                     unset($entityData['points']);
                 }
 
-                // Si 'pointvaleur' existe dans les anciennes données, la mapper vers points_unitaire_achat
                 if (isset($entityData['pointvaleur'])) {
                     if (!isset($entityData['points_unitaire_achat'])) {
                         $entityData['points_unitaire_achat'] = $entityData['pointvaleur'];
                     }
-                    // IMPORTANT : Supprimer pointvaleur car cette colonne n'existe plus
                     unset($entityData['pointvaleur']);
                 }
 
-                // S'assurer que les colonnes requises existent avec des valeurs par défaut
+                // S'assurer que les colonnes requises existent
                 if (!isset($entityData['prix_unitaire_achat'])) {
                     $entityData['prix_unitaire_achat'] = 0;
                 }
@@ -357,9 +628,7 @@ class BackupService
                     $entityData['online'] = 1;
                 }
 
-                // IMPORTANT : Ajouter purchase_date si manquant
                 if (!isset($entityData['purchase_date'])) {
-                    // Utiliser la date de création si disponible, sinon la date actuelle
                     if (isset($entityData['created_at'])) {
                         $entityData['purchase_date'] = date('Y-m-d', strtotime($entityData['created_at']));
                     } else {
@@ -367,13 +636,10 @@ class BackupService
                     }
                 }
 
-                // Supprimer les colonnes qui n'existent plus
                 unset($entityData['id_distrib_parent']);
-
                 break;
 
             case 'bonus':
-                // Mapper bonus vers montant si nécessaire
                 if (isset($entityData['bonus']) && !isset($entityData['montant'])) {
                     $entityData['montant'] = $entityData['bonus'];
                     unset($entityData['bonus']);
@@ -389,16 +655,8 @@ class BackupService
      */
     private function restoreEntity(string $entityType, array $entityData): void
     {
-        // LOG DE DEBUG
-        Log::info("=== DEBUT restoreEntity ===");
-        Log::info("Type: {$entityType}");
-        Log::info("Données AVANT mapping:", $entityData);
-
-        // Mapper les anciennes colonnes vers les nouvelles ET ajouter les champs manquants
+        // Mapper les anciennes colonnes vers les nouvelles
         $entityData = $this->mapOldColumnsToNew($entityType, $entityData);
-
-        // LOG DE DEBUG
-        Log::info("Données APRÈS mapping:", $entityData);
 
         // Retirer les timestamps pour éviter les conflits
         unset($entityData['created_at'], $entityData['updated_at']);
@@ -406,9 +664,6 @@ class BackupService
         // Ajouter les nouveaux timestamps
         $entityData['created_at'] = now();
         $entityData['updated_at'] = now();
-
-        // LOG DE DEBUG
-        Log::info("Données FINALES avant insertion:", $entityData);
 
         switch ($entityType) {
             case 'distributeur':
@@ -426,13 +681,10 @@ class BackupService
             default:
                 throw new \Exception("Type d'entité non supporté pour la restauration : {$entityType}");
         }
-
-        Log::info("=== FIN restoreEntity - Insertion réussie ===");
     }
 
     /**
      * Restaure les données liées
-     * VERSION CORRIGÉE : Gestion robuste des données manquantes
      */
     private function restoreRelatedData(string $entityType, int $entityId, array $relatedData): void
     {
@@ -449,37 +701,26 @@ class BackupService
 
             foreach ($relatedData['achats'] as $achat) {
                 try {
-                    // IMPORTANT : S'assurer que le distributeur_id est présent
                     if (!isset($achat['distributeur_id'])) {
                         $achat['distributeur_id'] = $entityId;
-                        Log::info("Ajout du distributeur_id manquant dans l'achat", [
-                            'achat_id' => $achat['id'] ?? 'unknown',
-                            'distributeur_id' => $entityId
-                        ]);
                     }
 
-                    // Vérifier les champs obligatoires avant insertion
                     if (!isset($achat['products_id'])) {
                         Log::warning("Achat ignoré car products_id manquant", [
                             'achat_id' => $achat['id'] ?? 'unknown',
-                            'distributeur_id' => $entityId,
-                            'achat_data' => $achat
+                            'distributeur_id' => $entityId
                         ]);
                         $skipped++;
-                        continue; // Passer à l'achat suivant
+                        continue;
                     }
 
-                    // Mapper les données de l'achat
                     $achat = $this->mapOldColumnsToNew('achat', $achat);
-
-                    // Supprimer les timestamps pour éviter les conflits
                     unset($achat['created_at'], $achat['updated_at']);
                     $achat['created_at'] = now();
                     $achat['updated_at'] = now();
 
                     DB::table('achats')->insert($achat);
                     $restored++;
-                    Log::info("Achat restauré avec succès", ['achat_id' => $achat['id'] ?? 'new']);
 
                 } catch (\Exception $e) {
                     Log::error("Erreur lors de la restauration d'un achat lié", [
@@ -489,21 +730,12 @@ class BackupService
                     $skipped++;
                 }
             }
-
-            if ($skipped > 0) {
-                Log::warning("Certains achats n'ont pas pu être restaurés", [
-                    'restored' => $restored,
-                    'skipped' => $skipped,
-                    'total' => count($relatedData['achats'])
-                ]);
-            }
         }
 
         // Restaurer les bonus d'un distributeur
         if ($entityType === 'distributeur' && isset($relatedData['bonuses'])) {
             foreach ($relatedData['bonuses'] as $bonus) {
                 try {
-                    // S'assurer que le distributeur_id est présent
                     if (!isset($bonus['distributeur_id'])) {
                         $bonus['distributeur_id'] = $entityId;
                     }
@@ -517,8 +749,7 @@ class BackupService
 
                 } catch (\Exception $e) {
                     Log::error("Erreur lors de la restauration d'un bonus lié", [
-                        'error' => $e->getMessage(),
-                        'bonus_data' => $bonus
+                        'error' => $e->getMessage()
                     ]);
                 }
             }
@@ -528,7 +759,6 @@ class BackupService
         if ($entityType === 'distributeur' && isset($relatedData['level_currents'])) {
             foreach ($relatedData['level_currents'] as $level) {
                 try {
-                    // S'assurer que le distributeur_id est présent
                     if (!isset($level['distributeur_id'])) {
                         $level['distributeur_id'] = $entityId;
                     }
@@ -541,8 +771,7 @@ class BackupService
 
                 } catch (\Exception $e) {
                     Log::error("Erreur lors de la restauration d'un level_current lié", [
-                        'error' => $e->getMessage(),
-                        'level_data' => $level
+                        'error' => $e->getMessage()
                     ]);
                 }
             }

@@ -112,13 +112,21 @@
                                        required>
                             </div>
 
-                            <div>
+                            <div class="space-y-3">
                                 <label class="flex items-center">
                                     <input type="checkbox"
-                                           name="simulate"
+                                           name="dry_run"
                                            value="1"
                                            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
                                     <span class="ml-2 text-sm text-gray-700">Mode simulation (aucune modification)</span>
+                                </label>
+
+                                <label class="flex items-center">
+                                    <input type="checkbox"
+                                           name="validated_only"
+                                           value="1"
+                                           class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                                    <span class="ml-2 text-sm text-gray-700">Calculer uniquement pour les distributeurs avec achats validés</span>
                                 </label>
                             </div>
 

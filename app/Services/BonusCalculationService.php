@@ -1,77 +1,150 @@
 <?php
-// app/Services/BonusCalculationService.php
 
 namespace App\Services;
 
-use App\Models\Bonus;
-use App\Models\BonusThreshold;
-use App\Models\LevelCurrent;
 use App\Models\Distributeur;
-use App\Models\SystemPeriod;
+use App\Models\LevelCurrent;
+use App\Models\Bonus;
+use App\Models\Achat;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Collection;
 
 class BonusCalculationService
 {
     /**
+     * Taux de bonus direct selon votre système actuel
+     * Correspond exactement à tauxDirectCalculator()
+     */
+    protected const TAUX_DIRECT = [
+        1 => 0,        // 0%
+        2 => 0.06,     // 6%
+        3 => 0.22,     // 22%
+        4 => 0.26,     // 26%
+        5 => 0.30,     // 30%
+        6 => 0.34,     // 34%
+        7 => 0.40,     // 40%
+        8 => 0.43,     // 43%
+        9 => 0.45,     // 45%
+        10 => 0.45     // 45%
+    ];
+
+    /**
+     * Seuils d'éligibilité selon votre système actuel
+     * Correspond exactement à isBonusEligible()
+     */
+    protected const SEUILS_ELIGIBILITE = [
+        1 => ['eligible' => false, 'quota' => 0],
+        2 => ['eligible' => true, 'quota' => 0],
+        3 => ['eligible' => 'conditionnel', 'quota' => 10],
+        4 => ['eligible' => 'conditionnel', 'quota' => 15],
+        5 => ['eligible' => 'conditionnel', 'quota' => 30],
+        6 => ['eligible' => 'conditionnel', 'quota' => 50],
+        7 => ['eligible' => 'conditionnel', 'quota' => 100],
+        8 => ['eligible' => 'conditionnel', 'quota' => 150],
+        9 => ['eligible' => 'conditionnel', 'quota' => 180],
+        10 => ['eligible' => 'conditionnel', 'quota' => 180]
+    ];
+
+    /**
+     * Matrice des taux indirects selon votre système actuel
+     * Correspond exactement à etoilesChecker()
+     */
+    protected const MATRICE_TAUX_INDIRECT = [
+        2 => [
+            0 => 0,
+            1 => 0.06
+        ],
+        3 => [
+            0 => 0,
+            1 => 0.16,
+            2 => 0.22
+        ],
+        4 => [
+            0 => 0,
+            1 => 0.04,
+            2 => 0.20,
+            3 => 0.26
+        ],
+        5 => [
+            0 => 0,
+            1 => 0.04,
+            2 => 0.08,
+            3 => 0.24,
+            4 => 0.30
+        ],
+        6 => [
+            0 => 0,
+            1 => 0.04,
+            2 => 0.08,
+            3 => 0.12,
+            4 => 0.28,
+            5 => 0.34
+        ],
+        7 => [
+            0 => 0,
+            1 => 0.06,
+            2 => 0.10,
+            3 => 0.14,
+            4 => 0.18,
+            5 => 0.34,
+            6 => 0.40
+        ],
+        8 => [
+            0 => 0,
+            1 => 0.03,
+            2 => 0.09,
+            3 => 0.13,
+            4 => 0.17,
+            5 => 0.21,
+            6 => 0.37,
+            7 => 0.43
+        ],
+        9 => [
+            0 => 0,
+            1 => 0.02,
+            2 => 0.05,
+            3 => 0.11,
+            4 => 0.15,
+            5 => 0.19,
+            6 => 0.23,
+            7 => 0.39,
+            8 => 0.45
+        ]
+    ];
+
+    /**
      * Calcule les bonus pour tous les distributeurs d'une période
      */
-    public function calculateBonusesForPeriod(string $period, array $options = []): array
+    public function calculateBonusForPeriod(string $period)
     {
-        $startTime = microtime(true);
-        $dryRun = $options['dry_run'] ?? false;
-        $onlyEligible = $options['only_eligible'] ?? true;
-
-        Log::info("Début du calcul des bonus", [
-            'period' => $period,
-            'options' => $options
-        ]);
-
-        // Vérifier que la période est valide
-        $systemPeriod = SystemPeriod::where('period', $period)->first();
-        if (!$systemPeriod) {
-            return [
-                'success' => false,
-                'message' => 'Période invalide'
-            ];
-        }
-
         DB::beginTransaction();
+
         try {
             // 1. Récupérer tous les distributeurs éligibles
-            $eligibleDistributors = $this->getEligibleDistributors($period, $onlyEligible);
+            $distributors = $this->getEligibleDistributors($period);
 
-            // 2. Calculer les bonus pour chaque distributeur
-            $bonusResults = $this->calculateIndividualBonuses($eligibleDistributors, $period);
+            Log::info("Calcul des bonus pour {$distributors->count()} distributeurs éligibles", [
+                'period' => $period
+            ]);
 
-            // 3. Sauvegarder les bonus (si pas dry run)
-            if (!$dryRun) {
-                $savedBonuses = $this->saveBonuses($bonusResults, $period);
-            } else {
-                $savedBonuses = ['count' => count($bonusResults), 'total' => collect($bonusResults)->sum('total_bonus')];
-            }
+            // 2. Calculer les bonus individuels
+            $bonusResults = $this->calculateIndividualBonuses($distributors, $period);
 
-            if ($dryRun) {
-                DB::rollBack();
-                $message = "Simulation terminée - Aucun bonus enregistré";
-            } else {
-                DB::commit();
-                $message = "Calcul des bonus terminé avec succès";
-            }
+            // 3. Sauvegarder les bonus
+            $savedStats = $this->saveBonuses($bonusResults, $period);
 
-            $duration = round(microtime(true) - $startTime, 2);
+            DB::commit();
 
             return [
                 'success' => true,
-                'message' => $message,
-                'duration' => $duration,
+                'message' => "Bonus calculés avec succès",
                 'stats' => [
-                    'eligible_distributors' => $eligibleDistributors->count(),
-                    'bonuses_calculated' => count($bonusResults),
-                    'total_amount' => $savedBonuses['total'],
-                    'details' => $dryRun ? $bonusResults : []
-                ]
+                    'total_distributors' => $distributors->count(),
+                    'bonus_calculated' => count($bonusResults),
+                    'total_amount' => $savedStats['total']
+                ],
+                'details' => $bonusResults
             ];
 
         } catch (\Exception $e) {
@@ -90,25 +163,48 @@ class BonusCalculationService
 
     /**
      * Récupère les distributeurs éligibles aux bonus
+     * Utilise exactement votre logique d'éligibilité
      */
-    protected function getEligibleDistributors(string $period, bool $onlyEligible = true): Collection
+    protected function getEligibleDistributors(string $period): Collection
     {
-        $query = LevelCurrent::where('period', $period)
-                            ->with(['distributeur', 'distributeur.parent']);
+        return LevelCurrent::where('period', $period)
+            ->with(['distributeur'])
+            ->get()
+            ->filter(function ($levelCurrent) use ($period) {
+                // Vérifier l'éligibilité selon votre logique
+                $eligible = $this->isBonusEligible($levelCurrent->etoiles, $levelCurrent->new_cumul);
 
-        if ($onlyEligible) {
-            // Joindre avec la table des seuils pour filtrer
-            $query->join('bonus_thresholds', 'level_currents.etoiles', '=', 'bonus_thresholds.grade')
-                  ->where('bonus_thresholds.is_active', true)
-                  ->whereRaw('level_currents.new_cumul >= bonus_thresholds.minimum_pv')
-                  ->select('level_currents.*', 'bonus_thresholds.minimum_pv');
-        }
+                if (!$eligible[0]) {
+                    return false;
+                }
 
-        return $query->get();
+                // Vérifier qu'il a fait des achats
+                $hasAchats = Achat::where('distributeur_id', $levelCurrent->distributeur_id)
+                    ->where('period', $period)
+                    ->exists();
+
+                if (!$hasAchats) {
+                    Log::debug("Distributeur {$levelCurrent->distributeur_id} n'a pas d'achats pour {$period}");
+                    return false;
+                }
+
+                // Vérifier qu'il n'a pas déjà de bonus
+                $existingBonus = Bonus::where('distributeur_id', $levelCurrent->distributeur_id)
+                    ->where('period', $period)
+                    ->exists();
+
+                if ($existingBonus) {
+                    Log::debug("Distributeur {$levelCurrent->distributeur_id} a déjà un bonus pour {$period}");
+                    return false;
+                }
+
+                return true;
+            });
     }
 
     /**
      * Calcule les bonus individuels pour chaque distributeur
+     * Utilise exactement votre logique de calcul
      */
     protected function calculateIndividualBonuses(Collection $distributors, string $period): array
     {
@@ -117,243 +213,357 @@ class BonusCalculationService
         foreach ($distributors as $levelCurrent) {
             $distributeur = $levelCurrent->distributeur;
 
-            // Vérifier le seuil minimum de PV
-            $minimumPv = BonusThreshold::getMinimumPvForGrade($levelCurrent->etoiles);
-            if ($levelCurrent->new_cumul < $minimumPv) {
-                Log::debug("Distributeur {$distributeur->distributeur_id} non éligible - PV insuffisants", [
-                    'pv_actuel' => $levelCurrent->new_cumul,
-                    'pv_minimum' => $minimumPv
-                ]);
-                continue;
+            // 1. Calculer le bonus direct
+            $tauxDirect = $this->tauxDirectCalculator($levelCurrent->etoiles);
+            $bonusDirect = $levelCurrent->new_cumul * $tauxDirect;
+
+            // 2. Calculer le bonus indirect (toute la descendance avec blocage)
+            $bonusIndirectResult = $this->calculateBonusIndirect($levelCurrent, $period);
+            $bonusIndirect = $bonusIndirectResult['total'];
+
+            // 3. Calculer le total et appliquer la logique d'épargne
+            $bonusTotal = $bonusDirect + $bonusIndirect;
+            $decimal = $bonusTotal - floor($bonusTotal);
+
+            // Logique d'épargne exacte de votre système
+            if ($decimal > 0.5) {
+                $bonusFinal = floor($bonusTotal);
+                $epargne = $decimal;
+            } else {
+                if ($bonusTotal > 1) {
+                    $bonusFinal = $bonusTotal - 1;
+                    $epargne = 1;
+                } else {
+                    $bonusFinal = $bonusTotal;
+                    $epargne = 0;
+                }
             }
 
-            // Calculer les différents types de bonus
-            $bonusDetail = [
-                'distributeur_id' => $distributeur->id,
+            // Générer le numéro de bonus
+            $numero = $this->generateBonusNumber();
+
+            $bonusResults[] = [
+                'distributeur_id' => $levelCurrent->distributeur_id,
                 'matricule' => $distributeur->distributeur_id,
-                'nom' => $distributeur->nom_distributeur . ' ' . $distributeur->pnom_distributeur,
-                'grade' => $levelCurrent->etoiles,
-                'pv_periode' => $levelCurrent->new_cumul,
-                'bonus_direct' => 0,
-                'bonus_indirect' => 0,
-                'bonus_leadership' => 0,
-                'total_bonus' => 0,
-                'details' => []
+                'nom_distributeur' => $distributeur->nom_distributeur,
+                'pnom_distributeur' => $distributeur->pnom_distributeur,
+                'period' => $period,
+                'numero' => $numero,
+                'etoiles' => $levelCurrent->etoiles,
+                'new_cumul' => $levelCurrent->new_cumul,
+                'bonus_direct' => $bonusDirect,
+                'bonus_indirect' => $bonusIndirect,
+                'bonus' => $bonusTotal,
+                'bonusFinal' => $bonusFinal,
+                'epargne' => $epargne
             ];
-
-            // 1. Calcul du bonus direct (sur ses propres ventes)
-            $bonusDetail['bonus_direct'] = $this->calculateDirectBonus($levelCurrent);
-
-            // 2. Calcul du bonus indirect (sur les ventes de la descendance)
-            $indirectResult = $this->calculateIndirectBonus($distributeur->id, $levelCurrent->etoiles, $period);
-            $bonusDetail['bonus_indirect'] = $indirectResult['total'];
-            $bonusDetail['details']['indirect'] = $indirectResult['details'];
-
-            // 3. Calcul du bonus de leadership (pour grades 4+)
-            if ($levelCurrent->etoiles >= 4) {
-                $leadershipResult = $this->calculateLeadershipBonus($distributeur->id, $levelCurrent->etoiles, $period);
-                $bonusDetail['bonus_leadership'] = $leadershipResult['total'];
-                $bonusDetail['details']['leadership'] = $leadershipResult['details'];
-            }
-
-            // Total
-            $bonusDetail['total_bonus'] = $bonusDetail['bonus_direct'] +
-                                         $bonusDetail['bonus_indirect'] +
-                                         $bonusDetail['bonus_leadership'];
-
-            if ($bonusDetail['total_bonus'] > 0) {
-                $bonusResults[] = $bonusDetail;
-            }
         }
 
         return $bonusResults;
     }
 
     /**
-     * Calcule le bonus direct sur les ventes personnelles
+     * Calcule le bonus indirect pour un distributeur
+     * Le cumul_total de chaque enfant inclut déjà toute sa descendance
      */
-    protected function calculateDirectBonus(LevelCurrent $levelCurrent): float
+    protected function calculateBonusIndirect(LevelCurrent $levelCurrent, string $period): array
     {
-        // Taux de bonus direct selon le grade
-        $tauxDirect = [
-            1 => 0.10,  // 10%
-            2 => 0.12,  // 12%
-            3 => 0.14,  // 14%
-            4 => 0.16,  // 16%
-            5 => 0.18,  // 18%
-            6 => 0.20,  // 20%
-            7 => 0.22,  // 22%
-            8 => 0.24,  // 24%
-            9 => 0.26,  // 26%
-            10 => 0.28  // 28%
-        ];
-
-        $taux = $tauxDirect[$levelCurrent->etoiles] ?? 0.10;
-
-        return $levelCurrent->new_cumul * $taux;
-    }
-
-    /**
-     * Calcule le bonus indirect récursivement
-     */
-    protected function calculateIndirectBonus(int $distributeurId, int $gradeParent, string $period, int $depth = 0): array
-    {
-        $maxDepth = 20; // Protection contre récursion infinie
-        if ($depth >= $maxDepth) {
-            return ['total' => 0, 'details' => []];
-        }
-
         $totalBonus = 0;
         $details = [];
 
-        // Récupérer les filleuls directs
-        $filleuls = LevelCurrent::where('period', $period)
-                               ->where('id_distrib_parent', $distributeurId)
-                               ->with('distributeur')
-                               ->get();
+        // Récupérer les enfants directs
+        $enfants = LevelCurrent::where('id_distrib_parent', $levelCurrent->distributeur_id)
+            ->where('period', $period)
+            ->with('distributeur')
+            ->get();
 
-        foreach ($filleuls as $filleul) {
-            // Calculer la différence de grade
-            $differenceGrade = $gradeParent - $filleul->etoiles;
-
-            if ($differenceGrade > 0) {
-                // Calculer le taux selon la différence
-                $taux = $this->getTauxByDifference($differenceGrade);
-
-                // Bonus sur le cumul_total du filleul (inclut ses ventes + celles de sa descendance)
-                $bonusFilleul = $filleul->cumul_total * $taux;
-
-                $totalBonus += $bonusFilleul;
-
+        foreach ($enfants as $enfant) {
+            // Si l'enfant a un grade >= au parent, on doit chercher les blocages dans sa descendance
+            if ($enfant->etoiles >= $levelCurrent->etoiles) {
+                // On ne calcule pas de bonus sur cet enfant
                 $details[] = [
-                    'filleul_matricule' => $filleul->distributeur->distributeur_id,
-                    'filleul_nom' => $filleul->distributeur->nom_distributeur . ' ' . $filleul->distributeur->pnom_distributeur,
-                    'filleul_grade' => $filleul->etoiles,
-                    'difference_grade' => $differenceGrade,
-                    'taux' => $taux,
-                    'cumul_total' => $filleul->cumul_total,
-                    'bonus' => $bonusFilleul
+                    'distributeur_id' => $enfant->distributeur_id,
+                    'matricule' => $enfant->distributeur->distributeur_id,
+                    'nom' => $enfant->distributeur->nom_distributeur,
+                    'grade' => $enfant->etoiles,
+                    'status' => 'BLOQUE - Grade >= Parent',
+                    'bonus' => 0
                 ];
-
-                // Récursion pour les sous-filleuls
-                $sousFilleulsResult = $this->calculateIndirectBonus(
-                    $filleul->distributeur_id,
-                    $gradeParent,
-                    $period,
-                    $depth + 1
-                );
-
-                $totalBonus += $sousFilleulsResult['total'];
-                if (!empty($sousFilleulsResult['details'])) {
-                    $details = array_merge($details, $sousFilleulsResult['details']);
-                }
+                continue;
             }
-        }
 
-        return ['total' => $totalBonus, 'details' => $details];
-    }
+            // L'enfant a un grade inférieur, on peut calculer le bonus
+            $diff = $levelCurrent->etoiles - $enfant->etoiles;
+            $taux = $this->etoilesChecker($levelCurrent->etoiles, $diff);
 
-    /**
-     * Calcule le bonus de leadership pour les grades élevés
-     */
-    protected function calculateLeadershipBonus(int $distributeurId, int $grade, string $period): array
-    {
-        // Le bonus de leadership est calculé sur le volume total de l'équipe
-        // mais uniquement pour les branches où il y a au moins un manager (grade 4+)
+            // On doit vérifier s'il y a des blocages dans la descendance de cet enfant
+            $cumulAjuste = $this->getCumulAjuste($enfant, $levelCurrent->etoiles, $period);
 
-        $totalBonus = 0;
-        $details = [];
+            $bonusEnfant = $cumulAjuste * $taux;
+            $totalBonus += $bonusEnfant;
 
-        // Taux de leadership selon le grade
-        $tauxLeadership = [
-            4 => 0.02,   // 2%
-            5 => 0.025,  // 2.5%
-            6 => 0.03,   // 3%
-            7 => 0.035,  // 3.5%
-            8 => 0.04,   // 4%
-            9 => 0.045,  // 4.5%
-            10 => 0.05   // 5%
-        ];
-
-        $taux = $tauxLeadership[$grade] ?? 0;
-
-        if ($taux > 0) {
-            // Récupérer toutes les branches avec au moins un manager
-            $branchesWithManagers = $this->getBranchesWithManagers($distributeurId, $period);
-
-            foreach ($branchesWithManagers as $branche) {
-                $bonusBranche = $branche['volume_total'] * $taux;
-                $totalBonus += $bonusBranche;
-
-                $details[] = [
-                    'branche_manager' => $branche['manager_matricule'],
-                    'branche_volume' => $branche['volume_total'],
-                    'taux' => $taux,
-                    'bonus' => $bonusBranche
-                ];
-            }
-        }
-
-        return ['total' => $totalBonus, 'details' => $details];
-    }
-
-    /**
-     * Récupère les branches avec des managers
-     */
-    protected function getBranchesWithManagers(int $distributeurId, string $period): array
-    {
-        $branches = [];
-
-        // Récupérer les filleuls directs qui sont managers (grade 4+)
-        $managers = LevelCurrent::where('period', $period)
-                              ->where('id_distrib_parent', $distributeurId)
-                              ->where('etoiles', '>=', 4)
-                              ->with('distributeur')
-                              ->get();
-
-        foreach ($managers as $manager) {
-            // Calculer le volume total de la branche du manager
-            $volumeBranche = $this->calculateBranchVolume($manager->distributeur_id, $period);
-
-            $branches[] = [
-                'manager_matricule' => $manager->distributeur->distributeur_id,
-                'manager_nom' => $manager->distributeur->nom_distributeur . ' ' . $manager->distributeur->pnom_distributeur,
-                'manager_grade' => $manager->etoiles,
-                'volume_total' => $volumeBranche
+            $details[] = [
+                'distributeur_id' => $enfant->distributeur_id,
+                'matricule' => $enfant->distributeur->distributeur_id,
+                'nom' => $enfant->distributeur->nom_distributeur,
+                'grade' => $enfant->etoiles,
+                'difference' => $diff,
+                'taux' => $taux,
+                'cumul_total_original' => $enfant->cumul_total,
+                'cumul_ajuste' => $cumulAjuste,
+                'bonus' => $bonusEnfant,
+                'status' => 'OK'
             ];
         }
 
-        return $branches;
-    }
-
-    /**
-     * Calcule le volume total d'une branche
-     */
-    protected function calculateBranchVolume(int $rootDistributeurId, string $period): float
-    {
-        // Le cumul_collectif contient déjà le volume total de la branche
-        $levelCurrent = LevelCurrent::where('distributeur_id', $rootDistributeurId)
-                                  ->where('period', $period)
-                                  ->first();
-
-        return $levelCurrent ? $levelCurrent->cumul_collectif : 0;
-    }
-
-    /**
-     * Retourne le taux selon la différence de grade
-     */
-    protected function getTauxByDifference(int $difference): float
-    {
-        $taux = [
-            1 => 0.04,   // 4%
-            2 => 0.08,   // 8%
-            3 => 0.12,   // 12%
-            4 => 0.16,   // 16%
-            5 => 0.18    // 18%
+        return [
+            'total' => $totalBonus,
+            'details' => $details
         ];
+    }
 
-        // Pour une différence > 5, on garde 18%
-        return $taux[$difference] ?? 0.18;
+    /**
+     * Obtient le cumul ajusté en soustrayant les cumuls des branches bloquées
+     */
+    protected function getCumulAjuste($distributeur, $gradeOrigine, $period): float
+    {
+        $cumulTotal = $distributeur->cumul_total;
+
+        // Chercher les enfants qui bloquent (grade >= grade origine)
+        $enfantsBloquants = LevelCurrent::where('id_distrib_parent', $distributeur->distributeur_id)
+            ->where('period', $period)
+            ->where('etoiles', '>=', $gradeOrigine)
+            ->get();
+
+        // Soustraire le cumul de chaque branche bloquée
+        foreach ($enfantsBloquants as $bloquant) {
+            $cumulTotal -= $bloquant->cumul_total;
+        }
+
+        // S'assurer qu'on ne retourne pas un nombre négatif
+        return max(0, $cumulTotal);
+    }
+
+    /**
+     * Détermine l'éligibilité d'un distributeur
+     * Copie exacte de votre méthode isBonusEligible
+     */
+    public function isBonusEligible($etoiles, $cumul): array
+    {
+        switch($etoiles) {
+            case 1:
+                $bonus = false;
+                $quota = 0;
+                break; // Fix: ajout du break manquant
+            case 2:
+                $bonus = true;
+                $quota = 0;
+                break;
+            case 3:
+                $bonus = ($cumul >= 10) ? true : false;
+                $quota = 10;
+                break;
+            case 4:
+                $bonus = ($cumul >= 15) ? true : false;
+                $quota = 15;
+                break;
+            case 5:
+                $bonus = ($cumul >= 30) ? true : false;
+                $quota = 30;
+                break;
+            case 6:
+                $bonus = ($cumul >= 50) ? true : false;
+                $quota = 50;
+                break;
+            case 7:
+                $bonus = ($cumul >= 100) ? true : false;
+                $quota = 100;
+                break;
+            case 8:
+                $bonus = ($cumul >= 150) ? true : false;
+                $quota = 150;
+                break;
+            case 9:
+                $bonus = ($cumul >= 180) ? true : false;
+                $quota = 180;
+                break;
+            case 10:
+                $bonus = ($cumul >= 180) ? true : false;
+                $quota = 180;
+                break;
+            default:
+                $bonus = false;
+                $quota = 0;
+        }
+
+        return [$bonus, $quota];
+    }
+
+    /**
+     * Calcule le taux direct selon le niveau d'étoiles
+     * Copie exacte de votre méthode tauxDirectCalculator
+     */
+    public function tauxDirectCalculator($etoiles): float
+    {
+        switch($etoiles) {
+            case 1:
+                $taux_dir = 0;
+                break;
+            case 2:
+                $taux_dir = 6/100;
+                break;
+            case 3:
+                $taux_dir = 22/100;
+                break;
+            case 4:
+                $taux_dir = 26/100;
+                break;
+            case 5:
+                $taux_dir = 30/100;
+                break;
+            case 6:
+                $taux_dir = 34/100;
+                break;
+            case 7:
+                $taux_dir = 40/100;
+                break;
+            case 8:
+                $taux_dir = 43/100;
+                break;
+            case 9:
+                $taux_dir = 45/100;
+                break;
+            case 10:
+                $taux_dir = 45/100;
+                break;
+            default:
+                $taux_dir = 0;
+        }
+
+        return $taux_dir;
+    }
+
+    /**
+     * Calcule le taux indirect selon la différence d'étoiles
+     * Copie exacte de votre méthode etoilesChecker
+     */
+    public function etoilesChecker($etoiles, $diff): float
+    {
+        $taux = 0; // Valeur par défaut
+
+        switch($etoiles) {
+            case 1:
+                $taux = 0;
+                break;
+            case 2:
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.06;
+                break;
+            case 3:
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.16;
+                if($diff == 2)
+                    $taux = 0.22;
+                break;
+            case 4:
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.20;
+                if($diff == 3)
+                    $taux = 0.26;
+                break;
+            case 5:
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.08;
+                if($diff == 3)
+                    $taux = 0.24;
+                if($diff == 4)
+                    $taux = 0.30;
+                break;
+            case 6:
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.08;
+                if($diff == 3)
+                    $taux = 0.12;
+                if($diff == 4)
+                    $taux = 0.28;
+                if($diff == 5)
+                    $taux = 0.34;
+                break;
+            case 7:
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.06;
+                if($diff == 2)
+                    $taux = 0.1;
+                if($diff == 3)
+                    $taux = 0.14;
+                if($diff == 4)
+                    $taux = 0.18;
+                if($diff == 5)
+                    $taux = 0.34;
+                if($diff == 6)
+                    $taux = 0.40;
+                break;
+            case 8:
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.03;
+                if($diff == 2)
+                    $taux = 0.09;
+                if($diff == 3)
+                    $taux = 0.13;
+                if($diff == 4)
+                    $taux = 0.17;
+                if($diff == 5)
+                    $taux = 0.21;
+                if($diff == 6)
+                    $taux = 0.37;
+                if($diff == 7)
+                    $taux = 0.43;
+                break;
+            case 9:
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.02;
+                if($diff == 2)
+                    $taux = 0.05;
+                if($diff == 3)
+                    $taux = 0.11;
+                if($diff == 4)
+                    $taux = 0.15;
+                if($diff == 5)
+                    $taux = 0.19;
+                if($diff == 6)
+                    $taux = 0.23;
+                if($diff == 7)
+                    $taux = 0.39;
+                if($diff == 8)
+                    $taux = 0.45;
+                break;
+            default:
+                $taux = 0;
+        }
+
+        return $taux;
     }
 
     /**
@@ -363,110 +573,190 @@ class BonusCalculationService
     {
         $savedCount = 0;
         $totalAmount = 0;
+        $totalAmountCFA = 0;
 
         foreach ($bonusResults as $bonusData) {
-            // Générer le numéro de bonus
-            $numBonus = $this->generateBonusNumber($period);
+            // Vérifier encore une fois qu'il n'y a pas de doublon
+            $exists = Bonus::where('distributeur_id', $bonusData['distributeur_id'])
+                ->where('period', $period)
+                ->exists();
 
-            $bonus = Bonus::create([
-                'num' => $numBonus,
+            if ($exists) {
+                continue;
+            }
+
+            // Calcul des montants en CFA (1€ = 500 FCFA)
+            $montantDirectCFA = $bonusData['bonus_direct'] * 500;
+            $montantIndirectCFA = $bonusData['bonus_indirect'] * 500;
+            $montantTotalCFA = $bonusData['bonusFinal'] * 500;
+
+            // Créer le tableau de données avec les bonnes valeurs
+            $dataToSave = [
+                'num' => $bonusData['numero'],
                 'distributeur_id' => $bonusData['distributeur_id'],
                 'period' => $period,
-                'montant_direct' => $bonusData['bonus_direct'],
-                'montant_indirect' => $bonusData['bonus_indirect'],
-                'montant_leadership' => $bonusData['bonus_leadership'],
-                'montant_total' => $bonusData['total_bonus'],
+                // Montants en euros - S'assurer que les valeurs sont bien passées
+                'bonus_direct' => floatval($bonusData['bonus_direct']),
+                'bonus_indirect' => floatval($bonusData['bonus_indirect']),
+                'bonus_leadership' => 0, // Pas encore implémenté
+                'bonus' => floatval($bonusData['bonusFinal']),
+                'epargne' => floatval($bonusData['epargne']),
+                'montant' => floatval($bonusData['bonusFinal']), // Pour compatibilité
+                // Montants en CFA
+                'montant_direct' => $montantDirectCFA,
+                'montant_indirect' => $montantIndirectCFA,
+                'montant_leadership' => 0,
+                'montant_total' => $montantTotalCFA,
+                // Statut
                 'status' => 'calculé',
-                'details' => json_encode($bonusData['details']),
-                'calculated_at' => now()
+                'created_at' => now(),
+                'updated_at' => now()
+            ];
+
+            // Log pour debug
+            Log::info("Sauvegarde bonus", [
+                'distributeur_id' => $bonusData['distributeur_id'],
+                'data' => $dataToSave
             ]);
 
+            // Utiliser create avec le tableau de données
+            $bonus = Bonus::create($dataToSave);
+
             $savedCount++;
-            $totalAmount += $bonusData['total_bonus'];
+            $totalAmount += $bonusData['bonusFinal'];
+            $totalAmountCFA += $montantTotalCFA;
         }
 
         Log::info("Bonus sauvegardés", [
             'period' => $period,
             'count' => $savedCount,
-            'total' => $totalAmount
+            'total' => $totalAmount,
+            'total_cfa' => $totalAmountCFA
         ]);
 
         return [
             'count' => $savedCount,
-            'total' => $totalAmount
+            'total' => $totalAmount,
+            'total_cfa' => $totalAmountCFA
         ];
     }
 
     /**
      * Génère un numéro de bonus unique
+     * Utilise la même logique que votre système
      */
-    protected function generateBonusNumber(string $period): string
+    protected function generateBonusNumber(): string
     {
-        // Format: 7770MMYYXXX
-        $prefix = '7770';
+        $lastBonus = Bonus::orderBy('id', 'desc')->first();
 
-        // Extraire mois et année
-        $parts = explode('-', $period);
-        $year = substr($parts[0], -2);
-        $month = $parts[1];
-
-        $baseNumber = $prefix . $month . $year;
-
-        // Trouver le prochain numéro séquentiel
-        $lastBonus = Bonus::where('num', 'like', $baseNumber . '%')
-                         ->orderBy('num', 'desc')
-                         ->first();
-
-        if ($lastBonus) {
-            $lastSequence = intval(substr($lastBonus->num, -3));
-            $nextSequence = $lastSequence + 1;
-        } else {
-            $nextSequence = 1;
+        if ($lastBonus && $lastBonus->num) {
+            return strval(intval($lastBonus->num) + 1);
         }
 
-        return $baseNumber . str_pad($nextSequence, 3, '0', STR_PAD_LEFT);
+        return '77700304001';
     }
 
     /**
-     * Valide et approuve les bonus pour paiement
+     * Calcule le bonus pour un distributeur spécifique
+     * (Pour remplacer la méthode show() dans les contrôleurs)
      */
-    public function validateBonusesForPayment(string $period, int $userId): array
+    public function calculateBonusForDistributor(string $matricule, string $period): array
     {
-        DB::beginTransaction();
-        try {
-            $bonuses = Bonus::where('period', $period)
-                          ->where('status', 'calculé')
-                          ->get();
+        $distributeur = Distributeur::where('distributeur_id', $matricule)->first();
 
-            $validatedCount = 0;
-            $totalValidated = 0;
-
-            foreach ($bonuses as $bonus) {
-                $bonus->update([
-                    'status' => 'validé',
-                    'validated_by' => $userId,
-                    'validated_at' => now()
-                ]);
-
-                $validatedCount++;
-                $totalValidated += $bonus->montant_total;
-            }
-
-            DB::commit();
-
-            return [
-                'success' => true,
-                'message' => "Bonus validés avec succès",
-                'count' => $validatedCount,
-                'total' => $totalValidated
-            ];
-
-        } catch (\Exception $e) {
-            DB::rollBack();
+        if (!$distributeur) {
             return [
                 'success' => false,
-                'message' => 'Erreur: ' . $e->getMessage()
+                'message' => 'Distributeur non trouvé'
             ];
         }
+
+        $levelCurrent = LevelCurrent::where('distributeur_id', $distributeur->id)
+            ->where('period', $period)
+            ->first();
+
+        if (!$levelCurrent) {
+            return [
+                'success' => false,
+                'message' => 'Pas de données pour cette période'
+            ];
+        }
+
+        // Vérifier l'éligibilité
+        $eligible = $this->isBonusEligible($levelCurrent->etoiles, $levelCurrent->new_cumul);
+
+        if (!$eligible[0]) {
+            return [
+                'success' => false,
+                'eligible' => false,
+                'data' => [
+                    'distributeur_id' => $matricule,
+                    'nom_distributeur' => $distributeur->nom_distributeur,
+                    'pnom_distributeur' => $distributeur->pnom_distributeur,
+                    'new_cumul' => $levelCurrent->new_cumul,
+                    'period' => $period,
+                    'numero' => 'non éligible',
+                    'etoiles' => $levelCurrent->etoiles,
+                    'bonus_direct' => 0,
+                    'bonus_indirect' => 0,
+                    'bonus' => 0,
+                    'quota' => $eligible[1],
+                    'bonusFinal' => 0
+                ]
+            ];
+        }
+
+        // Vérifier les achats
+        $hasAchats = Achat::where('distributeur_id', $distributeur->id)
+            ->where('period', $period)
+            ->exists();
+
+        if (!$hasAchats) {
+            return [
+                'success' => false,
+                'message' => "Le distributeur n'a pas effectué d'achats"
+            ];
+        }
+
+        // Vérifier si le bonus existe déjà
+        $existingBonus = Bonus::where('distributeur_id', $distributeur->id)
+            ->where('period', $period)
+            ->first();
+
+        if ($existingBonus) {
+            return [
+                'success' => false,
+                'message' => 'Le distributeur a déjà touché son bonus',
+                'data' => [
+                    'duplicata' => true,
+                    'distributeur_id' => $matricule,
+                    'nom_distributeur' => $distributeur->nom_distributeur,
+                    'pnom_distributeur' => $distributeur->pnom_distributeur,
+                    'period' => $period,
+                    'numero' => $existingBonus->num,
+                    'etoiles' => $levelCurrent->etoiles,
+                    'bonus_direct' => $existingBonus->bonus_direct,
+                    'bonus_indirect' => $existingBonus->bonus_indirect,
+                    'bonus' => $existingBonus->bonus,
+                    'bonusFinal' => $existingBonus->bonus,
+                    'epargne' => $existingBonus->epargne
+                ]
+            ];
+        }
+
+        // Calculer le bonus
+        $bonusData = $this->calculateIndividualBonuses(collect([$levelCurrent]), $period);
+
+        if (empty($bonusData)) {
+            return [
+                'success' => false,
+                'message' => 'Erreur lors du calcul du bonus'
+            ];
+        }
+
+        return [
+            'success' => true,
+            'data' => $bonusData[0]
+        ];
     }
 }

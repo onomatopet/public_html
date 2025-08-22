@@ -12,10 +12,19 @@ class Bonus extends Model
         'num',
         'distributeur_id',
         'period',
+        // AJOUTER CES COLONNES IMPORTANTES !
+        'bonus_direct',
+        'bonus_indirect',
+        'bonus_leadership',
+        'bonus', // Total après épargne
+        'montant', // Pour compatibilité
+        'epargne',
+        // Montants en CFA
         'montant_direct',
         'montant_indirect',
         'montant_leadership',
         'montant_total',
+        // Autres champs
         'status',
         'details',
         'calculated_at',
@@ -26,10 +35,19 @@ class Bonus extends Model
     ];
 
     protected $casts = [
+        // Montants en euros
+        'bonus_direct' => 'decimal:2',
+        'bonus_indirect' => 'decimal:2',
+        'bonus_leadership' => 'decimal:2',
+        'bonus' => 'decimal:2',
+        'montant' => 'decimal:2',
+        'epargne' => 'decimal:2',
+        // Montants en CFA
         'montant_direct' => 'decimal:2',
         'montant_indirect' => 'decimal:2',
         'montant_leadership' => 'decimal:2',
         'montant_total' => 'decimal:2',
+        // Autres
         'details' => 'array',
         'calculated_at' => 'datetime',
         'validated_at' => 'datetime',
@@ -54,15 +72,12 @@ class Bonus extends Model
 
     /**
      * Scope pour filtrer par période
-     * Correction : accepte maintenant une période nullable
      */
     public function scopeForPeriod($query, ?string $period = null)
     {
-        // Si la période est null ou vide, on ne filtre pas
         if (empty($period)) {
             return $query;
         }
-
         return $query->where('period', $period);
     }
 
@@ -79,10 +94,13 @@ class Bonus extends Model
     public function getFormattedNumAttribute(): string
     {
         // Format: 7770-MM-YY-XXX
-        return substr($this->num, 0, 4) . '-' .
-               substr($this->num, 4, 2) . '-' .
-               substr($this->num, 6, 2) . '-' .
-               substr($this->num, 8, 3);
+        if (strlen($this->num) >= 11) {
+            return substr($this->num, 0, 4) . '-' .
+                   substr($this->num, 4, 2) . '-' .
+                   substr($this->num, 6, 2) . '-' .
+                   substr($this->num, 8, 3);
+        }
+        return $this->num;
     }
 
     public function canBeValidated(): bool
@@ -93,5 +111,18 @@ class Bonus extends Model
     public function canBePaid(): bool
     {
         return $this->status === self::STATUS_VALIDE;
+    }
+
+    /**
+     * Accesseurs utiles
+     */
+    public function getTotalEurosAttribute(): float
+    {
+        return $this->bonus ?? 0;
+    }
+
+    public function getTotalCfaAttribute(): float
+    {
+        return $this->montant_total ?? 0;
     }
 }

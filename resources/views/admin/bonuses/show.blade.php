@@ -62,7 +62,6 @@
 
         {{-- Container du reçu --}}
         <div class="web-container print-area" style="max-width: 1200px; margin: 0 auto;">
-            <link rel="stylesheet" href="https://eternalcongo.com/public/assets/invoice/web/modern-normalize.css">
             <link rel="stylesheet" href="https://eternalcongo.com/public/assets/invoice/web/web-base.css">
             <link rel="stylesheet" href="https://eternalcongo.com/public/assets/invoice//invoice.css">
             

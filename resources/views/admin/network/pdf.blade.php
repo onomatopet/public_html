@@ -1,3 +1,5 @@
+{{-- resources/views/admin/network/imprimable.blade.php --}}
+
 <!doctype html>
 <html lang="fr">
     <head>
@@ -5,8 +7,8 @@
         <title>{{ $mainDistributor->distributeur_id }}_{{ strtoupper($mainDistributor->nom_distributeur) }}_NETWORK_STRUCTURE </title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
         <!-- Styles -->
-        <link type="text/css" rel="stylesheet" href="{{ asset('assets/css/materialize.min.css') }}"/>
-        <link href="{{ asset('assets/css/jquery.tabfinalTables.min.css') }}" rel="stylesheet">
+        <link type="text/css" rel="stylesheet" href="{{ asset('public/assets/css/materialize.min.css') }}"/>
+        <link href="{{ asset('public/assets/css/jquery.tabfinalTables.min.css') }}" rel="stylesheet">
 
     <style>
 
@@ -58,6 +60,18 @@
             margin-bottom: -10pt
         }
 
+        /* Styles pour les sous-totaux */
+        .sous-total {
+            background-color: #f0f0f0;
+            font-weight: bold;
+            border-top: 1px solid #666;
+        }
+
+        .double-ligne {
+            border-bottom: 2px solid #333;
+            height: 2px;
+        }
+
     @media print{
         .boutonPrint
             {display: none;}
@@ -68,12 +82,13 @@
     <body class="white">
 <body>
 
+
 <table align="center">
     <tr>
         <td align="center" colspan="2">
             <p>
             <h4 class="center">
-                {{ strtoupper($mainDistributor->nom_distributeur) }} {{ strtoupper($mainDistributor->pnom_distributeur) }} ( {{ $mainDistributor->distributeur_id }} ) [Row: 1--{{ count($distributeurs) }}]
+                {{ strtoupper($mainDistributor->nom_distributeur) }} {{ strtoupper($mainDistributor->pnom_distributeur) }} ( {{ $mainDistributor->distributeur_id }} ) [Row: 1--{{ collect($distributeurs)->where('type', 'distributeur')->count() }}]
             </h4>
             <h5 class="center">ETERNAL Details Network Structure ({{ $period }})</h5>
             <h5 class="center">eternalcongo.com - contact@eternalcongo.com</h5>
@@ -105,25 +120,34 @@
                     </tr>
                 </thead>
                 <tbody>
-
-                    @foreach($distributeurs as $distributeur)
-                    <tr>
-                        <td>{{ $distributeur['distributeur_id'] }}</td>
-                        <td>{{ $distributeur['rang'] }}</td>
-                        <td>{{ $distributeur['nom_distributeur'].' '.$distributeur['pnom_distributeur'] }}</td>
-                        <td>{{ $distributeur['etoiles'] }}</td>
-                        <td>${{ $distributeur['new_cumul'] }}</td>
-                        <td>${{ $distributeur['cumul_total'] }}</td>
-                        <td>${{ $distributeur['cumul_collectif'] }}</td>
-                        <td>{{ $distributeur['id_distrib_parent'] }}</td>
-                        <td>{{ strtoupper($distributeur['nom_parent']) }} {{ strtoupper($distributeur['pnom_parent']) }}</td>
-                    </tr>
-
+                    @foreach($distributeurs as $item)
+                        @if($item['type'] === 'distributeur')
+                            <tr>
+                                <td>{{ $item['distributeur_id'] }}</td>
+                                <td>{{ $item['rang'] }}</td>
+                                <td>{{ $item['nom_distributeur'].' '.$item['pnom_distributeur'] }}</td>
+                                <td>{{ $item['etoiles'] }}</td>
+                                <td>${{ $item['new_cumul'] }}</td>
+                                <td>${{ $item['cumul_total'] }}</td>
+                                <td>${{ $item['cumul_collectif'] }}</td>
+                                <td>{{ $item['id_distrib_parent'] }}</td>
+                                <td>{{ strtoupper($item['nom_parent']) }} {{ strtoupper($item['pnom_parent']) }}</td>
+                            </tr>
+                        @elseif($item['type'] === 'sous_total')
+                            {{-- Ligne de sous-total --}}
+                            <tr>
+                                <td colspan="9" class="sous-total">
+                                    Sous-total Pied {{ $item['pied_number'] }}: {{ $item['total_distributeurs'] }} distributeurs | PV Total: ${{ number_format($item['total_pv'], 0, '.', ' ') }}
+                                </td>
+                            </tr>
+                            {{-- Double ligne de séparation --}}
+                            <tr>
+                                <td colspan="9" class="double-ligne"></td>
+                            </tr>
+                        @endif
                     @endforeach
                 </tbody>
             </table>
         </td>
     </tr>
 </table>
-
-

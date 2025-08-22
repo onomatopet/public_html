@@ -1,9 +1,9 @@
 <?php
-// app/Providers/AppServiceProvider.php
 
 namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
+use App\Contracts\CacheServiceInterface;
 use App\Services\CacheService;
 use App\Services\SharedHostingCacheService;
 use App\Services\PerformanceMonitoringService;
@@ -16,9 +16,22 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        // Utiliser les versions SharedHosting si on n'est pas en production avec Redis
+        // Enregistrer l'interface CacheServiceInterface
         if (config('cache.default') !== 'redis') {
-            $this->app->bind(CacheService::class, SharedHostingCacheService::class);
+            // Utiliser SharedHostingCacheService pour l'hébergement mutualisé
+            $this->app->bind(CacheServiceInterface::class, SharedHostingCacheService::class);
+        } else {
+            // Utiliser CacheService standard pour Redis
+            $this->app->bind(CacheServiceInterface::class, CacheService::class);
+        }
+
+        // Pour la compatibilité avec le code existant qui utilise directement les classes
+        $this->app->bind(CacheService::class, function ($app) {
+            return $app->make(CacheServiceInterface::class);
+        });
+
+        // Gestion du service de monitoring de performance
+        if (config('cache.default') !== 'redis') {
             $this->app->bind(PerformanceMonitoringService::class, SharedHostingPerformanceService::class);
         }
     }

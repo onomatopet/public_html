@@ -62,28 +62,6 @@
                             </svg>
                             Imprimer
                         </button>
-
-                        {{-- Bouton Export PDF
-                        <form action="{{ route('admin.network.export.pdf') }}" method="POST" class="inline">
-                            @csrf
-                            <input type="hidden" name="distributeur_id" value="{{ request('distributeur_id') }}">
-                            <input type="hidden" name="period" value="{{ request('period', $period) }}">
-                            <button type="submit"
-                                    class="inline-flex items-center px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors duration-200">
-                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                                </svg>
-                                Export PDF
-                            </button>
-                        </form>
-
-                        <button onclick="exportToExcel()"
-                                class="inline-flex items-center px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-colors duration-200">
-                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M9 21h6a2 2 0 002-2V9l-5-5H7a2 2 0 00-2 2v13a2 2 0 002 2z"/>
-                            </svg>
-                            Export Excel
-                        </button>--}}
                     </div>
                 </div>
 
@@ -107,7 +85,7 @@
                                     </h3>
                                     <p class="text-sm text-blue-700">
                                         Période: {{ request('period', now()->format('Y-m')) }} |
-                                        Total réseau: {{ count($distributeurs) }} distributeurs
+                                        Total réseau: {{ collect($distributeurs)->where('type', 'distributeur')->count() }} distributeurs
                                     </p>
                                 </div>
                             </div>
@@ -133,6 +111,9 @@
                                 Rang
                             </th>
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider print:px-4 print:py-2 print:text-black print:font-bold print:text-sm print:border print:border-black">
+                                Ind.<br class="print:hidden"/>PV
+                            </th>
+                            <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider print:px-4 print:py-2 print:text-black print:font-bold print:text-sm print:border print:border-black">
                                 New<br class="print:hidden"/>PV
                             </th>
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider print:px-4 print:py-2 print:text-black print:font-bold print:text-sm print:border print:border-black">
@@ -150,45 +131,61 @@
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200 print:bg-transparent">
-                        @foreach($distributeurs as $distributeur)
-                            <tr class="{{ $distributeur['rang'] == 0 ? 'bg-yellow-50 print:bg-transparent' : ($distributeur['rang'] == 1 ? 'bg-blue-50 print:bg-transparent' : 'bg-white print:bg-transparent') }}">
-                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    {{ $distributeur['distributeur_id'] }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    {{-- Indentation pour la hiérarchie --}}
-                                    <span class="inline-block" style="margin-left: {{ $distributeur['rang'] * 1.5 }}rem">
-                                        {{ $distributeur['rang'] }}
-                                    </span>
-                                    {{ strtoupper($distributeur['nom_distributeur']) }} {{ strtoupper($distributeur['pnom_distributeur']) }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    {{ $distributeur['etoiles'] }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    ${{ number_format($distributeur['new_cumul'] ?? 0, 0, '.', '') }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    ${{ number_format($distributeur['cumul_total'] ?? 0, 0, '.', '') }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-semibold text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    ${{ number_format($distributeur['cumul_collectif'] ?? 0, 0, '.', '') }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    {{ $distributeur['id_distrib_parent'] }}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
-                                    {{ strtoupper($distributeur['nom_parent']) }} {{ strtoupper($distributeur['pnom_parent']) }}
-                                </td>
-                            </tr>
+                        @foreach($distributeurs as $item)
+                            @if($item['type'] === 'distributeur')
+                                <tr class="{{ $item['rang'] == 0 ? 'bg-yellow-50 print:bg-transparent' : ($item['rang'] == 1 ? 'bg-blue-50 print:bg-transparent' : 'bg-white print:bg-transparent') }}">
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        {{ $item['distributeur_id'] }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        {{-- Indentation pour la hiérarchie --}}
+                                        <span class="inline-block" style="margin-left: {{ $item['rang'] * 1.5 }}rem">
+                                            {{ $item['rang'] }}
+                                        </span>
+                                        {{ strtoupper($item['nom_distributeur']) }} {{ strtoupper($item['pnom_distributeur']) }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        {{ $item['etoiles'] }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        ${{ number_format($item['cumul_individuel'] ?? 0, 0, '.', '') }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        ${{ number_format($item['new_cumul'] ?? 0, 0, '.', '') }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        ${{ number_format($item['cumul_total'] ?? 0, 0, '.', '') }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-semibold text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        ${{ number_format($item['cumul_collectif'] ?? 0, 0, '.', '') }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        {{ $item['id_distrib_parent'] }}
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 print:px-4 print:py-2 print:border print:border-gray-300">
+                                        {{ strtoupper($item['nom_parent']) }} {{ strtoupper($item['pnom_parent']) }}
+                                    </td>
+                                </tr>
+                            @elseif($item['type'] === 'sous_total')
+                                {{-- Ligne de sous-total simple --}}
+                                <tr class="border-t border-gray-400 print:border-gray-600">
+                                    <td colspan="8" class="px-6 py-2 text-sm font-medium text-gray-700 bg-gray-100 print:bg-gray-200 print:px-4 print:py-1 print:border print:border-gray-600">
+                                        Sous-total Pied {{ $item['pied_number'] }}: {{ $item['total_distributeurs'] }} distributeurs | PV Total: ${{ number_format($item['total_pv'], 0, '.', ' ') }}
+                                    </td>
+                                </tr>
+                                {{-- Double ligne de séparation --}}
+                                <tr class="border-t-2 border-gray-900 print:border-black">
+                                    <td colspan="8" class="p-0"></td>
+                                </tr>
+                            @endif
                         @endforeach
                     </tbody>
                     <tfoot class="print:border-t-2 print:border-black">
                         <tr>
                             <td colspan="8" class="px-6 py-4 text-sm text-gray-700 print:px-4 print:py-2">
                                 <div class="flex justify-between">
-                                    <span>Total distributeurs: {{ count($distributeurs) }}</span>
-                                    <span>Total PV cumulés: ${{ number_format(collect($distributeurs)->sum('cumul_collectif'), 0, '.', ' ') }}</span>
+                                    <span>Total distributeurs: {{ collect($distributeurs)->where('type', 'distributeur')->count() }}</span>
+                                    <span>Total PV cumulés: ${{ number_format(collect($distributeurs)->where('type', 'distributeur')->sum('cumul_collectif'), 0, '.', ' ') }}</span>
                                 </div>
                             </td>
                         </tr>
@@ -341,39 +338,5 @@ function openPrintView() {
         document.body.removeChild(form);
     }, 100);
 }
-
-// Fonction d'export Excel
-function exportToExcel() {
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = '{{ route("admin.network.export.excel") }}';
-
-    const csrfInput = document.createElement('input');
-    csrfInput.type = 'hidden';
-    csrfInput.name = '_token';
-    csrfInput.value = '{{ csrf_token() }}';
-    form.appendChild(csrfInput);
-
-    const distribInput = document.createElement('input');
-    distribInput.type = 'hidden';
-    distribInput.name = 'distributeur_id';
-    distribInput.value = '{{ request("distributeur_id") }}';
-    form.appendChild(distribInput);
-
-    const periodInput = document.createElement('input');
-    periodInput.type = 'hidden';
-    periodInput.name = 'period';
-    periodInput.value = '{{ request("period", $period) }}';
-    form.appendChild(periodInput);
-
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
-}
-
-// Préparation avant impression
-window.addEventListener('beforeprint', function() {
-    // Ne rien faire ici car les styles CSS @media print gèrent déjà tout
-});
 </script>
 @endpush

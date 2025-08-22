@@ -4,139 +4,127 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\SystemPeriod;
-use App\Models\Achat;
-use App\Models\Distributeur;
-use App\Models\LevelCurrent;
 use App\Models\WorkflowLog;
+use App\Models\Bonus;
+use App\Models\Achat;
+use App\Models\LevelCurrent;
 use App\Services\WorkflowService;
+use App\Services\PurchaseAggregationService;
+use App\Services\CumulManagementService;
+use App\Services\LegacyBonusCalculationService;
+use App\Services\BatchAggregationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Schema;
 
 class WorkflowController extends Controller
 {
-    protected $workflowService;
+    protected WorkflowService $workflowService;
+    protected PurchaseAggregationService $purchaseAggregationService;
+    protected CumulManagementService $cumulManagementService;
 
-    public function __construct(WorkflowService $workflowService)
-    {
+    public function __construct(
+        WorkflowService $workflowService,
+        PurchaseAggregationService $purchaseAggregationService,
+        CumulManagementService $cumulManagementService
+    ) {
         $this->workflowService = $workflowService;
+        $this->purchaseAggregationService = $purchaseAggregationService;
+        $this->cumulManagementService = $cumulManagementService;
     }
 
     /**
-     * Affiche le tableau de bord du workflow
+     * Affiche la page principale du workflow
      */
     public function index(Request $request)
     {
-        // Récupérer la période depuis la requête ou prendre la période active
-        $requestedPeriod = $request->get('period');
+        $period = $request->get('period', date('Y-m'));
 
-        // Toutes les périodes pour le sélecteur
-        $allPeriods = SystemPeriod::orderBy('period', 'desc')
-            ->pluck('period')
-            ->toArray();
+        // Récupérer ou créer la période système
+        $systemPeriod = SystemPeriod::firstOrCreate(
+            ['period' => $period],
+            [
+                'status' => 'open',
+                'is_current' => true,
+                'opened_at' => now(),
+                'opened_by' => Auth::id()
+            ]
+        );
 
-        // Déterminer la période à afficher
-        if ($requestedPeriod && in_array($requestedPeriod, $allPeriods)) {
-            $period = $requestedPeriod;
-            $systemPeriod = SystemPeriod::where('period', $period)->first();
-        } else {
-            // Prendre la période active ou la plus récente
-            $systemPeriod = SystemPeriod::where('status', 'active')->first()
-                ?? SystemPeriod::orderBy('period', 'desc')->first();
-            $period = $systemPeriod ? $systemPeriod->period : null;
-        }
-
-        // Si aucune période n'existe
-        if (!$systemPeriod) {
-            return redirect()->route('admin.periods.index')
-                ->with('error', 'Aucune période trouvée. Veuillez créer une période.');
-        }
+        // Obtenir le statut du workflow
+        $workflowStatus = $this->workflowService->getWorkflowStatus($systemPeriod);
 
         // Statistiques pour chaque étape
         $stats = [
             'validation' => $this->getValidationStats($systemPeriod),
             'aggregation' => $this->getAggregationStats($systemPeriod),
             'advancement' => $this->getAdvancementStats($systemPeriod),
-            'snapshot' => $this->getSnapshotStats($systemPeriod),
+            'snapshot' => $this->getSnapshotStats($systemPeriod)
         ];
 
         // Logs récents
         $recentLogs = WorkflowLog::where('period', $period)
-            ->with('user')
             ->orderBy('created_at', 'desc')
-            ->limit(5)
+            ->limit(10)
             ->get();
+
+        // Toutes les périodes disponibles
+        $allPeriods = SystemPeriod::orderBy('period', 'desc')
+            ->pluck('period');
 
         return view('admin.workflow.index', compact(
             'systemPeriod',
-            'period',
-            'allPeriods',
+            'workflowStatus',
             'stats',
-            'recentLogs'
+            'recentLogs',
+            'allPeriods',
+            'period'
         ));
     }
 
     /**
-     * Affiche l'historique complet du workflow
-     */
-    public function history(Request $request, $period)
-    {
-        $logs = WorkflowLog::where('period', $period)
-            ->with('user')
-            ->orderBy('created_at', 'desc')
-            ->paginate(50);
-
-        return view('admin.workflow.history', compact('logs', 'period'));
-    }
-
-    /**
-     * Valide les achats d'une période
+     * Valide les achats
      */
     public function validatePurchases(Request $request)
     {
         $period = $request->input('period');
         $systemPeriod = SystemPeriod::where('period', $period)->firstOrFail();
 
-        // Log de début
         $log = $this->createWorkflowLog($systemPeriod, 'validation', 'start');
 
         try {
-            // Vérifier les prérequis
             if (!$systemPeriod->canValidatePurchases()) {
-                throw new \Exception('Les achats ne peuvent pas être validés dans l\'état actuel.');
+                throw new \Exception('La validation des achats ne peut pas être effectuée dans l\'état actuel.');
             }
 
             DB::beginTransaction();
 
-            // Récupérer les achats à valider
-            $achatsToValidate = Achat::where('period', $systemPeriod->period)
-                ->where('status', 'pending')
-                ->get();
+            // Valider tous les achats de la période
+            $achats = Achat::where('period', $period)
+                          ->where('status', 'pending')
+                          ->get();
 
             $validated = 0;
             $rejected = 0;
-            $errors = [];
 
-            foreach ($achatsToValidate as $achat) {
-                $validation = $this->validateSinglePurchase($achat);
+            foreach ($achats as $achat) {
+                $validationResult = $this->validateSinglePurchase($achat);
 
-                if ($validation['valid']) {
+                if ($validationResult['valid']) {
                     $achat->status = 'validated';
-                    $achat->validated_at = now();
                     $validated++;
                 } else {
                     $achat->status = 'rejected';
-                    $achat->validated_at = now();
-                    $achat->validation_errors = json_encode($validation['errors']);
+                    $achat->rejection_reason = implode(', ', $validationResult['errors']);
                     $rejected++;
-                    $errors[] = "Achat #{$achat->id}: " . implode(', ', $validation['errors']);
                 }
 
                 $achat->save();
             }
 
-            // Mettre à jour le statut du workflow
             $systemPeriod->purchases_validated = true;
             $systemPeriod->purchases_validated_at = now();
             $systemPeriod->purchases_validated_by = Auth::id();
@@ -144,23 +132,18 @@ class WorkflowController extends Controller
 
             DB::commit();
 
-            // Log de succès
-            $this->updateWorkflowLog($log, 'completed', [
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_COMPLETED, [
                 'validated' => $validated,
                 'rejected' => $rejected,
-                'total' => $achatsToValidate->count()
+                'total' => $achats->count()
             ]);
 
-            $message = "Validation terminée: {$validated} validés, {$rejected} rejetés.";
-
             return redirect()->route('admin.workflow.index', ['period' => $period])
-                ->with('success', $message);
+                ->with('success', "Validation terminée : {$validated} validés, {$rejected} rejetés.");
 
         } catch (\Exception $e) {
             DB::rollback();
-
-            // Log d'erreur
-            $this->updateWorkflowLog($log, 'failed', null, $e->getMessage());
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_FAILED, null, $e->getMessage());
 
             return redirect()->back()
                 ->with('error', 'Erreur lors de la validation: ' . $e->getMessage());
@@ -184,9 +167,20 @@ class WorkflowController extends Controller
 
             DB::beginTransaction();
 
-            // Agrégation logic here...
-            // [Code d'agrégation similaire à celui fourni précédemment]
+            // Utiliser le service d'agrégation batch
+            $batchService = app(BatchAggregationService::class);
 
+            // Exécuter l'agrégation
+            $result = $batchService->executeBatchAggregation($period, [
+                'batch_size' => 100,
+                'dry_run' => false
+            ]);
+
+            if (!$result['success']) {
+                throw new \Exception($result['message']);
+            }
+
+            // Mettre à jour le statut de la période
             $systemPeriod->purchases_aggregated = true;
             $systemPeriod->purchases_aggregated_at = now();
             $systemPeriod->purchases_aggregated_by = Auth::id();
@@ -194,10 +188,24 @@ class WorkflowController extends Controller
 
             DB::commit();
 
-            $this->updateWorkflowLog($log, 'completed');
+            // Log de succès avec les statistiques
+            $this->updateWorkflowLog($log, 'completed', [
+                'distributors_processed' => $result['stats']['distributors_processed'],
+                'updates' => $result['stats']['updates'],
+                'inserts' => $result['stats']['inserts'],
+                'duration' => $result['duration']
+            ]);
+
+            $message = sprintf(
+                'Agrégation terminée: %d distributeurs traités, %d mises à jour, %d insertions en %s secondes',
+                $result['stats']['distributors_processed'],
+                $result['stats']['updates'],
+                $result['stats']['inserts'],
+                $result['duration']
+            );
 
             return redirect()->route('admin.workflow.index', ['period' => $period])
-                ->with('success', 'Agrégation des achats terminée avec succès.');
+                ->with('success', $message);
 
         } catch (\Exception $e) {
             DB::rollback();
@@ -223,11 +231,10 @@ class WorkflowController extends Controller
                 throw new \Exception('Le calcul des avancements ne peut pas être effectué dans l\'état actuel.');
             }
 
-            // Exécuter la commande ProcessAdvancements
-            \Artisan::call('app:process-advancements', [
+            // Utiliser --validated-only au lieu de --type
+            Artisan::call('app:process-advancements', [
                 'period' => $systemPeriod->period,
-                '--type' => 'validated_only',
-                '--force' => true
+                '--include-non-validated' => true
             ]);
 
             $systemPeriod->advancements_calculated = true;
@@ -235,13 +242,13 @@ class WorkflowController extends Controller
             $systemPeriod->advancements_calculated_by = Auth::id();
             $systemPeriod->save();
 
-            $this->updateWorkflowLog($log, 'completed');
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_COMPLETED);
 
             return redirect()->route('admin.workflow.index', ['period' => $period])
                 ->with('success', 'Calcul des avancements terminé.');
 
         } catch (\Exception $e) {
-            $this->updateWorkflowLog($log, 'failed', null, $e->getMessage());
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_FAILED, null, $e->getMessage());
 
             return redirect()->back()
                 ->with('error', 'Erreur lors du calcul: ' . $e->getMessage());
@@ -265,8 +272,25 @@ class WorkflowController extends Controller
 
             DB::beginTransaction();
 
-            // Créer le snapshot
-            // [Code de création de snapshot]
+            // Créer le snapshot en copiant les données de level_currents vers level_current_histories
+            $levelCurrents = LevelCurrent::where('period', $period)->get();
+
+            $count = 0;
+            foreach ($levelCurrents->chunk(1000) as $chunk) {
+                foreach ($chunk as $levelCurrent) {
+                    DB::table('level_current_histories')->insert([
+                        'distributeur_id' => $levelCurrent->distributeur_id,
+                        'period' => $levelCurrent->period,
+                        'etoiles' => $levelCurrent->etoiles,
+                        'new_cumul' => $levelCurrent->new_cumul,
+                        'cumul_individuel' => $levelCurrent->cumul_individuel,
+                        'cumul_collectif' => $levelCurrent->cumul_collectif,
+                        'created_at' => now(),
+                        'updated_at' => now()
+                    ]);
+                    $count++;
+                }
+            }
 
             $systemPeriod->snapshot_created = true;
             $systemPeriod->snapshot_created_at = now();
@@ -275,14 +299,14 @@ class WorkflowController extends Controller
 
             DB::commit();
 
-            $this->updateWorkflowLog($log, 'completed');
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_COMPLETED, ['records' => $count]);
 
             return redirect()->route('admin.workflow.index', ['period' => $period])
-                ->with('success', 'Snapshot créé avec succès.');
+                ->with('success', "Snapshot créé avec succès. {$count} enregistrements archivés.");
 
         } catch (\Exception $e) {
             DB::rollback();
-            $this->updateWorkflowLog($log, 'failed', null, $e->getMessage());
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_FAILED, null, $e->getMessage());
 
             return redirect()->back()
                 ->with('error', 'Erreur lors de la création du snapshot: ' . $e->getMessage());
@@ -297,29 +321,64 @@ class WorkflowController extends Controller
         $period = $request->input('period');
         $systemPeriod = SystemPeriod::where('period', $period)->firstOrFail();
 
-        $log = $this->createWorkflowLog($systemPeriod, 'closing', 'start');
+        $log = $this->createWorkflowLog($systemPeriod, 'closure', 'start');
 
         try {
             if (!$systemPeriod->canClose()) {
                 throw new \Exception('La période ne peut pas être clôturée dans l\'état actuel.');
             }
 
-            $systemPeriod->status = 'closed';
+            DB::beginTransaction();
+
+            // Clôturer la période
+            $systemPeriod->status = SystemPeriod::STATUS_CLOSED;
             $systemPeriod->closed_at = now();
             $systemPeriod->closed_by = Auth::id();
+            $systemPeriod->is_current = false;
             $systemPeriod->save();
 
-            $this->updateWorkflowLog($log, 'completed');
+            // Créer la nouvelle période
+            $nextPeriod = date('Y-m', strtotime($period . ' +1 month'));
+            $newSystemPeriod = SystemPeriod::create([
+                'period' => $nextPeriod,
+                'status' => SystemPeriod::STATUS_OPEN,
+                'is_current' => true,
+                'opened_at' => now(),
+                'opened_by' => Auth::id()
+            ]);
 
-            return redirect()->route('admin.workflow.index')
-                ->with('success', 'Période clôturée avec succès.');
+            // Reporter les cumuls de la période clôturée vers la nouvelle
+            $this->carryOverCumuls($period, $nextPeriod);
+
+            DB::commit();
+
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_COMPLETED, [
+                'closed_period' => $period,
+                'new_period' => $nextPeriod
+            ]);
+
+            return redirect()->route('admin.workflow.index', ['period' => $nextPeriod])
+                ->with('success', "Période {$period} clôturée. Nouvelle période {$nextPeriod} créée.");
 
         } catch (\Exception $e) {
-            $this->updateWorkflowLog($log, 'failed', null, $e->getMessage());
+            DB::rollback();
+            $this->updateWorkflowLog($log, WorkflowLog::STATUS_FAILED, null, $e->getMessage());
 
             return redirect()->back()
                 ->with('error', 'Erreur lors de la clôture: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Affiche l'historique des actions
+     */
+    public function history($period)
+    {
+        $logs = WorkflowLog::where('period', $period)
+            ->orderBy('created_at', 'desc')
+            ->paginate(20);
+
+        return view('admin.workflow.history', compact('logs', 'period'));
     }
 
     /**
@@ -409,8 +468,13 @@ class WorkflowController extends Controller
      */
     protected function getSnapshotStats(SystemPeriod $systemPeriod): array
     {
+        $historyCount = DB::table('level_current_histories')
+            ->where('period', $systemPeriod->period)
+            ->count();
+
         return [
-            'ready' => $systemPeriod->advancements_calculated ? 'Oui' : 'Non'
+            'ready' => $systemPeriod->advancements_calculated ? 'Oui' : 'Non',
+            'archived' => $historyCount
         ];
     }
 
@@ -419,12 +483,14 @@ class WorkflowController extends Controller
      */
     protected function createWorkflowLog(SystemPeriod $systemPeriod, $step, $action)
     {
-        return WorkflowLog::logStart(
-            $systemPeriod->period,
-            $step,
-            $action,
-            Auth::id()
-        );
+        return WorkflowLog::create([
+            'period' => $systemPeriod->period,
+            'step' => $step,
+            'action' => $action,
+            'status' => WorkflowLog::STATUS_STARTED, // CORRECTION ICI : Utiliser la constante au lieu de 'processing'
+            'user_id' => Auth::id(),
+            'started_at' => now()
+        ]);
     }
 
     /**
@@ -432,10 +498,371 @@ class WorkflowController extends Controller
      */
     protected function updateWorkflowLog($log, $status, $details = null, $errorMessage = null)
     {
-        if ($status === 'completed') {
-            $log->complete($details ?: []);
-        } elseif ($status === 'failed') {
-            $log->fail($errorMessage, $details ?: []);
+        $log->update([
+            'status' => $status,
+            'completed_at' => now(),
+            'details' => $details,
+            'error_message' => $errorMessage
+        ]);
+    }
+
+    /**
+     * Report des cumuls de la période clôturée vers la nouvelle période
+     */
+    protected function carryOverCumuls(string $fromPeriod, string $toPeriod): void
+    {
+        // Récupérer tous les level_currents de la période clôturée
+        $levelCurrents = LevelCurrent::where('period', $fromPeriod)->get();
+
+        $insertData = [];
+        foreach ($levelCurrents as $level) {
+            $insertData[] = [
+                'distributeur_id' => $level->distributeur_id,
+                'period' => $toPeriod,
+                'rang' => $level->rang,
+                'etoiles' => $level->etoiles,
+                'cumul_individuel' => $level->cumul_individuel, // Report du cumul
+                'new_cumul' => 0, // Remis à zéro pour la nouvelle période
+                'cumul_total' => 0, // Remis à zéro pour la nouvelle période
+                'cumul_collectif' => $level->cumul_collectif, // Report du cumul historique
+                'id_distrib_parent' => $level->id_distrib_parent,
+                'created_at' => now(),
+                'updated_at' => now()
+            ];
+        }
+
+        // Insertion en batch
+        foreach (array_chunk($insertData, 1000) as $chunk) {
+            LevelCurrent::insert($chunk);
+        }
+
+        Log::info("Report des cumuls effectué", [
+            'from_period' => $fromPeriod,
+            'to_period' => $toPeriod,
+            'count' => count($insertData)
+        ]);
+    }
+
+    /**
+     * Calcule les bonus
+     */
+    public function calculateBonus(Request $request)
+    {
+        $period = $request->input('period');
+        $systemPeriod = SystemPeriod::where('period', $period)->firstOrFail();
+
+        $log = $this->createWorkflowLog($systemPeriod, 'bonus', 'start');
+
+        try {
+            if (!$systemPeriod->canCalculateBonus()) {
+                throw new \Exception('Le calcul des bonus ne peut pas être effectué dans l\'état actuel.');
+            }
+
+            DB::beginTransaction();
+
+            // Utiliser le service de calcul avec les anciennes règles
+            $bonusService = app(LegacyBonusCalculationService::class);
+
+            // Exécuter le calcul
+            $result = $bonusService->calculateBonusesForPeriod($period, [
+                'dry_run' => false,
+                'batch_size' => 100
+            ]);
+
+            if (!$result['success']) {
+                throw new \Exception($result['message']);
+            }
+
+            // Mettre à jour le statut de la période
+            $systemPeriod->markBonusCalculated(Auth::id());
+
+            DB::commit();
+
+            // Log de succès avec les statistiques
+            $this->updateWorkflowLog($log, 'completed', [
+                'total_distributeurs' => $result['stats']['total_distributeurs'],
+                'eligibles' => $result['stats']['eligibles'],
+                'bonuses_calculated' => $result['stats']['bonuses_calculated'],
+                'total_amount' => $result['stats']['total_amount'],
+                'duration' => $result['duration']
+            ]);
+
+            $message = sprintf(
+                'Calcul des bonus terminé: %d éligibles sur %d, %d bonus calculés pour un total de %s FCFA en %s secondes',
+                $result['stats']['eligibles'],
+                $result['stats']['total_distributeurs'],
+                $result['stats']['bonuses_calculated'],
+                number_format($result['stats']['total_amount'], 0, ',', ' '),
+                $result['duration']
+            );
+
+            return redirect()->route('admin.workflow.index', ['period' => $period])
+                ->with('success', $message);
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            $this->updateWorkflowLog($log, 'failed', null, $e->getMessage());
+
+            return redirect()->back()
+                ->with('error', 'Erreur lors du calcul des bonus: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Ajouter dans getAdvancementStats() pour afficher les stats de bonus
+     */
+    protected function getBonusStats(SystemPeriod $systemPeriod): array
+    {
+        if (!$systemPeriod->bonus_calculated) {
+            return [
+                'ready' => $systemPeriod->advancements_calculated ? 'Oui' : 'Non',
+                'message' => 'En attente du calcul des avancements'
+            ];
+        }
+
+        $stats = Bonus::where('period', $systemPeriod->period)
+            ->selectRaw('
+                COUNT(*) as total,
+                SUM(montant_direct) as total_direct,
+                SUM(montant_indirect) as total_indirect,
+                SUM(montant_total) as total_bonus,
+                SUM(epargne) as total_epargne
+            ')
+            ->first();
+
+        return [
+            'count' => $stats->total ?? 0,
+            'total_direct' => number_format($stats->total_direct ?? 0, 0, ',', ' ') . ' FCFA',
+            'total_indirect' => number_format($stats->total_indirect ?? 0, 0, ',', ' ') . ' FCFA',
+            'total_bonus' => number_format($stats->total_bonus ?? 0, 0, ',', ' ') . ' FCFA',
+            'total_epargne' => number_format($stats->total_epargne ?? 0, 0, ',', ' ') . ' FCFA'
+        ];
+    }
+
+    /**
+     * Réinitialise une étape spécifique du workflow
+     */
+    public function resetStep(Request $request)
+    {
+        $request->validate([
+            'period' => 'required|string',
+            'step' => 'required|string|in:purchases_validated,purchases_aggregated,advancements_calculated,bonus_calculated,snapshot_created'
+        ]);
+
+        $period = $request->input('period');
+        $step = $request->input('step');
+
+        $systemPeriod = SystemPeriod::where('period', $period)->firstOrFail();
+
+        // Vérifier que la période n'est pas fermée
+        if ($systemPeriod->status === SystemPeriod::STATUS_CLOSED) {
+            return redirect()->back()
+                ->with('error', 'Impossible de réinitialiser une étape sur une période fermée.');
+        }
+
+        DB::beginTransaction();
+        try {
+            // Logger l'action
+            WorkflowLog::create([
+                'period' => $period,
+                'step' => $step,
+                'action' => 'reset',
+                'status' => 'started',
+                'user_id' => Auth::id(),
+                'started_at' => now(),
+                'details' => ['reason' => $request->input('reason', 'Réinitialisation manuelle')]
+            ]);
+
+            // Réinitialiser selon l'étape
+            switch ($step) {
+                case 'purchases_validated':
+                    $this->resetPurchasesValidation($systemPeriod);
+                    break;
+
+                case 'purchases_aggregated':
+                    $this->resetPurchasesAggregation($systemPeriod);
+                    break;
+
+                case 'advancements_calculated':
+                    $this->resetAdvancements($systemPeriod);
+                    break;
+
+                case 'bonus_calculated':
+                    $this->resetBonus($systemPeriod);
+                    break;
+
+                case 'snapshot_created':
+                    $this->resetSnapshot($systemPeriod);
+                    break;
+            }
+
+            // Réinitialiser toutes les étapes suivantes
+            $this->resetSubsequentSteps($systemPeriod, $step);
+
+            DB::commit();
+
+            return redirect()->route('admin.workflow.index', ['period' => $period])
+                ->with('success', "L'étape a été réinitialisée avec succès.");
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            Log::error("Erreur lors de la réinitialisation de l'étape", [
+                'period' => $period,
+                'step' => $step,
+                'error' => $e->getMessage()
+            ]);
+
+            return redirect()->back()
+                ->with('error', 'Erreur lors de la réinitialisation: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Réinitialise la validation des achats
+     */
+    private function resetPurchasesValidation(SystemPeriod $systemPeriod): void
+    {
+        // Remettre tous les achats en statut pending
+        Achat::where('period', $systemPeriod->period)
+            ->update(['status' => 'pending']);
+
+        // Réinitialiser les flags
+        $systemPeriod->update([
+            'purchases_validated' => false,
+            'purchases_validated_at' => null,
+            'purchases_validated_by' => null
+        ]);
+
+        Log::info("Validation des achats réinitialisée", ['period' => $systemPeriod->period]);
+    }
+
+    /**
+     * Réinitialise l'agrégation des achats
+     */
+    private function resetPurchasesAggregation(SystemPeriod $systemPeriod): void
+    {
+        // Réinitialiser les cumuls dans level_currents
+        LevelCurrent::where('period', $systemPeriod->period)
+            ->update([
+                'new_cumul' => 0,
+                'cumul_total' => 0
+            ]);
+
+        // Note: On ne touche pas à cumul_individuel et cumul_collectif car ils sont historiques
+
+        $systemPeriod->update([
+            'purchases_aggregated' => false,
+            'purchases_aggregated_at' => null,
+            'purchases_aggregated_by' => null
+        ]);
+
+        Log::info("Agrégation des achats réinitialisée", ['period' => $systemPeriod->period]);
+    }
+
+    /**
+     * Réinitialise les avancements
+     */
+    private function resetAdvancements(SystemPeriod $systemPeriod): void
+    {
+        // Supprimer l'historique des avancements
+        if (Schema::hasTable('avancement_history')) {
+            DB::table('avancement_history')
+                ->where('period', $systemPeriod->period)
+                ->delete();
+        }
+
+        // Réinitialiser les grades dans level_currents à leur valeur d'origine
+        DB::statement("
+            UPDATE level_currents lc
+            JOIN distributeurs d ON lc.distributeur_id = d.id
+            SET lc.etoiles = d.etoiles_id
+            WHERE lc.period = ?
+        ", [$systemPeriod->period]);
+
+        $systemPeriod->update([
+            'advancements_calculated' => false,
+            'advancements_calculated_at' => null,
+            'advancements_calculated_by' => null
+        ]);
+
+        Log::info("Avancements réinitialisés", ['period' => $systemPeriod->period]);
+    }
+
+    /**
+     * Réinitialise les bonus
+     */
+    private function resetBonus(SystemPeriod $systemPeriod): void
+    {
+        // Supprimer tous les bonus de la période
+        Bonus::where('period', $systemPeriod->period)->delete();
+
+        $systemPeriod->update([
+            'bonus_calculated' => false,
+            'bonus_calculated_at' => null,
+            'bonus_calculated_by' => null
+        ]);
+
+        Log::info("Bonus réinitialisés", ['period' => $systemPeriod->period]);
+    }
+
+    /**
+     * Réinitialise le snapshot
+     */
+    private function resetSnapshot(SystemPeriod $systemPeriod): void
+    {
+        // Supprimer les snapshots si ils existent
+        // À adapter selon votre implémentation des snapshots
+
+        $systemPeriod->update([
+            'snapshot_created' => false,
+            'snapshot_created_at' => null,
+            'snapshot_created_by' => null
+        ]);
+
+        Log::info("Snapshot réinitialisé", ['period' => $systemPeriod->period]);
+    }
+
+    /**
+     * Réinitialise toutes les étapes suivant l'étape donnée
+     */
+    private function resetSubsequentSteps(SystemPeriod $systemPeriod, string $fromStep): void
+    {
+        $stepsOrder = [
+            'purchases_validated' => 1,
+            'purchases_aggregated' => 2,
+            'advancements_calculated' => 3,
+            'bonus_calculated' => 4,
+            'snapshot_created' => 5
+        ];
+
+        $fromOrder = $stepsOrder[$fromStep];
+
+        // Réinitialiser toutes les étapes après celle spécifiée
+        foreach ($stepsOrder as $step => $order) {
+            if ($order > $fromOrder) {
+                switch ($step) {
+                    case 'purchases_aggregated':
+                        if ($systemPeriod->purchases_aggregated) {
+                            $this->resetPurchasesAggregation($systemPeriod);
+                        }
+                        break;
+                    case 'advancements_calculated':
+                        if ($systemPeriod->advancements_calculated) {
+                            $this->resetAdvancements($systemPeriod);
+                        }
+                        break;
+                    case 'bonus_calculated':
+                        if ($systemPeriod->bonus_calculated) {
+                            $this->resetBonus($systemPeriod);
+                        }
+                        break;
+                    case 'snapshot_created':
+                        if ($systemPeriod->snapshot_created) {
+                            $this->resetSnapshot($systemPeriod);
+                        }
+                        break;
+                }
+            }
         }
     }
 }

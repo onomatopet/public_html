@@ -6,8 +6,11 @@ use App\Models\Achat;
 use App\Models\Distributeur;
 use App\Models\Distributor;
 use App\Models\Etoile;
-use App\Models\Level_current_test;
+use App\Models\Bonus;
+use App\Models\LevelCurrent;
+use Illuminate\Support\Facades\Log;
 use App\Services\EternalHelperLegacyMatriculeDB;
+use App\Services\DistributorLineageService;
 use App\Services\DistributorRankService;
 use App\Services\GradeCalculator;
 use App\Services\EternalHelper;
@@ -18,6 +21,10 @@ use Illuminate\Support\Arr;
 
 class debugageController extends Controller
 {
+
+    // Injection de dépendance
+    public function __construct(private DistributorLineageService $lineageService) {}
+
     /**
      * Display a listing of the resource.
      */
@@ -63,19 +70,19 @@ class debugageController extends Controller
      */
     public function create()
     {
-        $level = Level_current_test::where('id_distrib_parent', 3315206)->where('period', '2024-11')->get();
+        $level = LevelCurrent::where('id_distrib_parent', 3315206)->where('period', '2024-11')->get();
         return $level;
         //CALCUL DU CUMUL INDIVIDUEL AU CAS PAR CAS
         /**/
-        //$dbRecup = Level_current_test::where('distributeur_id', '6685253')->where('period', $period)->first();
+        //$dbRecup = LevelCurrent::where('distributeur_id', '6685253')->where('period', $period)->first();
         //return $dbRecup;
         /*
         $period = '2024-03';
-        $dbRecup = Level_current_test::where('period', $period)->get();
+        $dbRecup = LevelCurrent::where('period', $period)->get();
         //return $dbRecup;
         foreach ($dbRecup as $value) {
 
-            $collectif = Level_current_test::selectRaw('SUM(cumul_collectif) as children_collectif, etoiles, distributeur_id')
+            $collectif = LevelCurrent::selectRaw('SUM(cumul_collectif) as children_collectif, etoiles, distributeur_id')
                         ->where('period', $period)
                         ->where('id_distrib_parent', $value->distributeur_id)
                         //->where('etoiles', '<', $value->etoiles)
@@ -86,7 +93,7 @@ class debugageController extends Controller
                 if($reste >= 0)
                 {
 
-                    $updater = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+                    $updater = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
                     $updater->cumul_individuel = $reste;
                     $updater->update();
 
@@ -103,7 +110,7 @@ class debugageController extends Controller
                 else
                 {
                     /*
-                    $updater = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+                    $updater = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
                     $updater->cumul_individuel = $reste;
                     $updater->update();
                     *//*
@@ -122,7 +129,7 @@ class debugageController extends Controller
             }
             else {
                 /*
-                $collectif = Level_current_test::selectRaw('SUM(cumul_collectif) as children_collectif, etoiles, distributeur_id')
+                $collectif = LevelCurrent::selectRaw('SUM(cumul_collectif) as children_collectif, etoiles, distributeur_id')
                         ->where('period', $period)
                         ->where('distributeur_id', $value->distributeur_id)
                         //->where('etoiles', '<', $value->etoiles)
@@ -360,7 +367,7 @@ class debugageController extends Controller
     {
         $children = [];
 
-        $parains = Level_current_test::where('distributeur_id', $id_distrib_parent)->where('period', $period)->first();
+        $parains = LevelCurrent::where('distributeur_id', $id_distrib_parent)->where('period', $period)->first();
 
         if($parains)
         {
@@ -384,7 +391,7 @@ class debugageController extends Controller
     {
         $children = [];
 
-        $childDistributeurs = Level_current_test::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
+        $childDistributeurs = LevelCurrent::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
         foreach ($childDistributeurs as $child)
         {
             $children[] = array(
@@ -397,18 +404,393 @@ class debugageController extends Controller
         return $tab_total;
     }
 
+    // Méthode pour obtenir le level_current par matricule
+    public function getLevelCurrentByMatricule($matricule, $period)
+    {
+        $distributeur = Distributeur::where('distributeur_id', $matricule)->first();
+        if (!$distributeur) return null;
+
+        return LevelCurrent::where('distributeur_id', $distributeur->id)
+                        ->where('period', $period)
+                        ->first();
+    }
+
+
+
+    /* Fonction qui détermine l'élligibilité d'un distibuteur
+      à toucher son bonus direct et indirect
+     */
+    public function isBonusEligible($etoiles, $cumul)
+    {
+        switch($etoiles)
+        {
+            case 1 :
+                $bonus = false;
+                $quota = 0;
+            case 2 :
+                $bonus = true;
+                $quota = 0;
+            break;
+            case 3 :
+                $bonus = ($cumul >= 10) ? true : false;
+                $quota = 10;
+            break;
+            case 4 :
+                $bonus = ($cumul >= 15) ? true : false;
+                $quota = 15;
+            break;
+            case 5 :
+                $bonus = ($cumul >= 30) ? true : false;
+                $quota = 30;
+            break;
+            case 6 :
+                $bonus = ($cumul >= 50) ? true : false;
+                $quota = 50;
+            break;
+            case 7 :
+                $bonus = ($cumul >= 100) ? true : false;
+                $quota = 100;
+            break;
+            case 8 :
+                $bonus = ($cumul >= 150) ? true : false;
+                $quota = 150;
+            break;
+            case 9 :
+                $bonus = ($cumul >= 180) ? true : false;
+                $quota = 180;
+            break;
+            case 10 :
+                $bonus = ($cumul >= 180) ? true : false;
+                $quota = 180;
+            break;
+            default: $bonus = false; $quota = 0;
+        }
+        return [$bonus, $quota];
+    }
+
+    public function tauxDirectCalculator($etoiles)
+    {
+        switch($etoiles)
+        {
+            case 1: $taux_dir = 0;
+            break;
+            case 2: $taux_dir = 6/100;
+            break;
+            case 3: $taux_dir = 22/100;
+            break;
+            case 4: $taux_dir = 26/100;
+            break;
+            case 5: $taux_dir = 30/100;
+            break;
+            case 6: $taux_dir = 34/100;
+            break;
+            case 7: $taux_dir = 40/100;
+            break;
+            case 8: $taux_dir = 43/100;
+            break;
+            case 9: $taux_dir = 45/100;
+            break;
+            case 10: $taux_dir = 45/100;
+            break;
+        }
+        return $taux_dir;
+    }
+
+    public function etoilesChecker($etoiles, $diff)
+    {
+        switch($etoiles)
+        {
+            case 1 :
+
+                    $taux = 0;
+            break;
+            case 2 :
+
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                $taux = 0.06;
+            break;
+            case 3 :
+
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.16;
+                if($diff == 2)
+                    $taux = 0.22;
+            break;
+            case 4 :
+
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.20;
+                if($diff == 3)
+                    $taux = 0.26;
+            break;
+            case 5 :
+
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.08;
+                if($diff == 3)
+                    $taux = 0.24;
+                if($diff == 4)
+                    $taux = 0.30;
+            break;
+            case 6 :
+
+                if($diff <= 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.04;
+                if($diff == 2)
+                    $taux = 0.08;
+                if($diff == 3)
+                    $taux = 0.12;
+                if($diff == 4)
+                    $taux = 0.28;
+                if($diff == 5)
+                    $taux = 0.34;
+            break;
+            case 7 :
+
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.06;
+                if($diff == 2)
+                    $taux = 0.1;
+                if($diff == 3)
+                    $taux = 0.14;
+                if($diff == 4)
+                    $taux = 0.18;
+                if($diff == 5)
+                    $taux = 0.34;
+                if($diff == 6)
+                    $taux = 0.40;
+            break;
+            case 8 :
+
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.03;
+                if($diff == 2)
+                    $taux = 0.09;
+                if($diff == 3)
+                    $taux = 0.13;
+                if($diff == 4)
+                    $taux = 0.17;
+                if($diff == 5)
+                    $taux = 0.21;
+                if($diff == 6)
+                    $taux = 0.37;
+                if($diff == 7)
+                    $taux = 0.43;
+
+            break;
+            case 9 :
+
+                if($diff == 0)
+                    $taux = 0;
+                if($diff == 1)
+                    $taux = 0.02;
+                if($diff == 2)
+                    $taux = 0.05;
+                if($diff == 3)
+                    $taux = 0.11;
+                if($diff == 4)
+                    $taux = 0.15;
+                if($diff == 5)
+                    $taux = 0.19;
+                if($diff == 6)
+                    $taux = 0.23;
+                if($diff == 7)
+                    $taux = 0.39;
+                if($diff == 8)
+                    $taux = 0.45;
+            break;
+
+            break;
+            default: $taux = 0;
+        }
+        return $taux;
+    }
 
     public function show(Request $request)
     {
+        /*
+        $matricule = 2224866;
+        /** @var array $tauxDirect
+        global $tauxDirect, $bonusFinal, $total_direct, $total_indirect;
+        $partTab = [];
+        $partBonus = []; $tabfinal = []; $bonus = [];
+        global $etoilesDiff;
+        $period = '2025-07';//
+        $bonusTotal = 0;
+
+        $id_distib = Distributeur::where('distributeur_id', $matricule)->first();
+
+        $distrib = LevelCurrent::join('distributeurs', 'distributeurs.id','=','level_currents.distributeur_id')
+            ->where('level_currents.distributeur_id', $id_distib->id)->where('level_currents.period', $period)->first(['level_currents.*','distributeurs.*']);
+
+        $achatIsset = Achat::where('distributeur_id', $id_distib->id)->where('period', $period)->first();
+
+        if($achatIsset == null)
+        {
+            //Log::info('Le Distributeur n\'a pas effectué d\'achats', $achatIsset);
+            exit();
+        }
+
+        //return $distrib;etoilesChecker($etoiles, $diff)
+        //$cumul_total_reste = $distrib->cumul_total;
+        //return [$distrib->etoiles, $distrib->new_cumul];
+        $eligible = $this->isBonusEligible($distrib->etoiles, $distrib->new_cumul);
+
+        if(!$eligible[0])
+        {
+            $distributeurs = array(
+                'duplicata' => false,
+                'distributeur_id' => $matricule,
+                'nom_distributeur' => $distrib->nom_distributeur,
+                'pnom_distributeur' => $distrib->pnom_distributeur,
+                'new_cumul' => $distrib->new_cumul,
+                'period' => $period,
+                'numero' => 'non élligible',
+                'etoiles' => $distrib->etoiles,
+                'bonus_direct' => 0,
+                'bonus_indirect' => 0,
+                'bonus' => 0,
+                'quota' => $eligible[1],
+                'bonusFinal' => '0'
+            );
+
+            return view('layouts.bonus.printnon', [
+                "distributeurs" => $distributeurs
+            ]);
+        }
+        else
+        {
+            if($distrib->etoiles <= 1)
+            {
+                return 'Le Distributeur de rang 1 ne sont pas eligible';
+            }
+            else {
+
+                $firstGenealogie = LevelCurrent::where('id_distrib_parent', $id_distib->id)->where('period', $period)->get();
+                $tauxDirect = $this->tauxDirectCalculator($distrib->etoiles);
+                $bonusDirect = $distrib->new_cumul * $tauxDirect;
+                $isfirstGenealogie = count($firstGenealogie);
+
+                if($isfirstGenealogie > 0)
+                {
+                    foreach ($firstGenealogie as $value) {
+
+                        if($distrib->etoiles > $value->etoiles)
+                        {
+
+                            $diff = $distrib->etoiles - $value->etoiles;
+                            $taux = $this->etoilesChecker($distrib->etoiles, $diff);
+                            $bonus[] = $value->cumul_total * $taux;
+                        }
+                    }
+                }
+                else {
+                    $bonus[] = 0;
+                    $result[] = 0;
+                }
+            }
+            //$bonusIndirect = (array_sum($bonus) + array_sum($result));
+            //return $bonus;
+            $bonusIndirect = array_sum($bonus);
+            //return [$bonusIndirect, $bonus];
+            $bonusInfos = Bonus::latest()->first();
+            $bonusIsset = Bonus::where('distributeur_id', $distrib->distributeur_id)->where('period', $period)->first();
+
+            if($bonusIsset)
+            {
+                return 'Le Distributeur a déjà touché son bonus';
+            }
+
+            if($bonusInfos != null)
+            {
+                $numero = $bonusInfos->num+1;
+            }
+            else {
+                $numero = '77700304001';
+            }
+
+            $bonus = $bonusDirect + $bonusIndirect;
+            $decimal = $bonus - floor($bonus);
+
+            if($decimal > 0.5)
+            {
+                $bonusFinal = floor($bonus);
+                $epargne = $decimal;
+            }
+            else {
+                $bonusFinal = $bonus;
+
+                if($bonusFinal > 1)
+                {
+                    $bonusFinal = $bonusFinal-1;
+                    $epargne = 1;
+                }
+                else {
+                    $bonusFinal = $bonusFinal;
+                    $epargne = 0;
+                }
+            }
+
+            $distributeurs = array(
+                'duplicata' => false,
+                'distributeur_id' => $distrib->distributeur_id,
+                'nom_distributeur' => $distrib->nom_distributeur,
+                'pnom_distributeur' => $distrib->pnom_distributeur,
+                'period' => $period,
+                'numero' => $numero,
+                'etoiles' => $distrib->etoiles,
+                'bonus_direct' => $bonusDirect,
+                'bonus_indirect' => $bonusIndirect,
+                'bonus' => $bonus,
+                'bonusFinal' => $bonusFinal,
+                'epargne' => $epargne
+            );
+
+            return $distributeurs;
+            /*
+            $bonusInserted = new Bonuse();
+            $bonusInserted->period = $period;
+            $bonusInserted->num = $numero;
+            $bonusInserted->distributeur_id = $distrib->distributeur_id;
+            $bonusInserted->bonus_direct = $bonusDirect;
+            $bonusInserted->bonus_indirect = $bonusIndirect;
+            $bonusInserted->bonus = $bonusFinal;
+            //$bonusInserted->bonus_leadership
+            $bonusInserted->epargne = $epargne;
+            $bonusInserted->save();
+
+            return view('layouts.bonus.print', [
+                "distributeurs" => $distributeurs
+            ]);
+
+        }
 
         /*
         $period = '2025-06';
         $updateTab = [];
-        $select = Level_current_test::where('cumul_total', '>', 0)->where('period', $period)->get();
+        $select = LevelCurrent::where('cumul_total', '>', 0)->where('period', $period)->get();
 
         foreach ($select as $value) {
-            $select_last_period = Level_current_test::where('period', '2025-05')->where('distributeur_id', $value->distributeur_id)->first();
-            $level = Level_current_test::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
+            $select_last_period = LevelCurrent::where('period', '2025-05')->where('distributeur_id', $value->distributeur_id)->first();
+            $level = LevelCurrent::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
 
             $level->cumul_individuel = $select_last_period->cumul_individuel;
             $level->new_cumul = 0;
@@ -422,7 +804,7 @@ class debugageController extends Controller
         */
 
 
-        // NOUVEAUX ADHERENTS QUI ONT ETE INSERER DANS LEVEL_CURRENT_TEST AVEC UNE PERIOD=0
+        // NOUVEAUX ADHERENTS QUI ONT ETE INSERER DANS LevelCurrent AVEC UNE PERIOD=0
         /*
         $period = '2025-06';
         $rank = new DistributorRankService();
@@ -437,13 +819,13 @@ class debugageController extends Controller
         //->toSql();
         ->get();
 
-        $level = Level_current_test::where('period', 0)->get();
+        $level = LevelCurrent::where('period', 0)->get();
 
         if($level) {
 
             foreach ($level as $level_val){
 
-                $level_indiv = Level_current_test::where('distributeur_id', $level_val->distributeur_id)->first();
+                $level_indiv = LevelCurrent::where('distributeur_id', $level_val->distributeur_id)->first();
 
                 $level_indiv->period = $period;
                 $level_indiv->update();
@@ -475,7 +857,7 @@ class debugageController extends Controller
             $branchQualifier->loadAndBuildMaps();
 
             // Récupérer les données de niveau
-            $level = Level_current_test::where('distributeur_id', $distributeur_matricule)
+            $level = LevelCurrent::where('distributeur_id', $distributeur_matricule)
                                 ->where('period', $period)
                                 ->first();
 
@@ -509,7 +891,7 @@ class debugageController extends Controller
                 'calculated_new_grade' => $newPotentialLevel,
                 'promotion' => $newPotentialLevel > $level->etoiles ? 'OUI' : 'NON',
             ];
-
+            /*
             $level->etoiles = $newPotentialLevel;
             $level->update();
 
@@ -519,7 +901,7 @@ class debugageController extends Controller
         $rank = new DistributorRankService();
         $calculator = new GradeCalculator();
 
-        $level = Level_current_test::where('distributeur_id', $distributeur_id)->where('period', $period)->first();
+        $level = LevelCurrent::where('distributeur_id', $distributeur_id)->where('period', $period)->first();
 
         $countChildren = $rank->checkMultiLevelQualificationSeparateCountsMatricule($level->distributeur_id, $level->etoiles);
         $countChildrenpass1 = $countChildren['level_n_qualified_count'];
@@ -555,9 +937,9 @@ class debugageController extends Controller
         //COPIER LE CUMUL COLLECTIF DU MOIS PRECEDENT AU MOIS SUIVANT
         /*
         $i=0;
-        $collectif = Level_current_test::select('distributeur_id', 'cumul_collectif')->where('period', '2025-02')->get();
+        $collectif = LevelCurrent::select('distributeur_id', 'cumul_collectif')->where('period', '2025-02')->get();
         foreach ($collectif as $key => $value) {
-            $collectifEquals = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', '2025-03')->first();
+            $collectifEquals = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', '2025-03')->first();
             $collectifEquals->cumul_collectif = $value->cumul_collectif;
             //$collectifEquals->cumul_individuel = $value->cumul_individuel;
             $collectifEquals->update();
@@ -572,13 +954,13 @@ class debugageController extends Controller
         /*
 
         $period = '2025-06';
-        $level = Level_current_test::where('period', '2025-05')->get();
+        $level = LevelCurrent::where('period', '2025-05')->get();
         //return $level;
 
         foreach ($level as $line) {
 
             try {
-                Level_current_test::insert([
+                LevelCurrent::insert([
                     'distributeur_id' => $line->distributeur_id,
                     'period' => $period,
                     'rang' =>  $line->rang,
@@ -613,7 +995,7 @@ class debugageController extends Controller
         //return $achats;
 
         foreach ($distrib as $val) {
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)
                 ->where('period', $period)
                 ->select('etoiles', 'cumul_individuel', 'cumul_collectif')
                 ->first();
@@ -651,7 +1033,7 @@ class debugageController extends Controller
         $calculator = new GradeCalculator();
         $period = '2025-03';
 
-        $level = Level_current_test::where('distributeur_id', '2292819')->where('period', $period)->first();
+        $level = LevelCurrent::where('distributeur_id', '2292819')->where('period', $period)->first();
         //return $level;
 
         if($level)
@@ -689,22 +1071,22 @@ class debugageController extends Controller
             }
         }
 
-        /*
+        /** */
          // C'EST ICI QUE CA SE PASSE
         // RECALCULER L'AVANCEMENT EN GRADE DES DISTRIBUTEURS AYANT
         //
         $rank = new DistributorRankService();
         $calculator = new GradeCalculator();
-        $period = '2025-04';
-        $achats = Achat::selectRaw('period, distributeur_id, id_distrib_parent, sum(pointvaleur) as new_achats')
-            ->groupBy('distributeur_id')
+        $period = '2025-07';
+        $achats = Achat::selectRaw('period, distributeur_id, sum(points_unitaire_achat) as new_achats')
+            ->groupBy('distributeur_id', 'period')
             ->where('period', $period)
             //->toSql();
             ->get();
         //return $achats;
 
         foreach ($achats as $val) {
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
 
             if($level)
             {
@@ -722,12 +1104,13 @@ class debugageController extends Controller
                         'status' => 'Avancement en grade',
                         'count_enfants' => $countChildren
                     );
-
+                    /*
                     $distrib_change = Distributeur::where('distributeur_id', $level->distributeur_id)->first();
                     $distrib_change->etoiles_id = $newPotentialLevel;
                     $level->etoiles = $newPotentialLevel;
                     $level->update();
                     $distrib_change->update();
+                    */
                 }
                 else {
                     $tab[] = array(
@@ -747,7 +1130,7 @@ class debugageController extends Controller
                 if($distrib)
                 {
                     try {
-                        Level_current_test::insert([
+                        LevelCurrent::insert([
                             'distributeur_id' => $val->distributeur_id,
                             'period' => $period,
                             'rang' =>  $distrib->rang,
@@ -778,13 +1161,14 @@ class debugageController extends Controller
                             'status' => 'Avancement en grade',
                             'count_enfants' => $countChildren
                         );
-
+                        /*
                         $distrib_change = Distributeur::where('distributeur_id', $val->distributeur_id)->first();
-                        $level_change = Level_current_test::where('distributeur_id', $val->distributeur_id)->first();
+                        $level_change = LevelCurrent::where('distributeur_id', $val->distributeur_id)->first();
                         $distrib_change->etoiles_id = $newPotentialLevel;
                         $level_change->etoiles = $newPotentialLevel;
                         $level_change->update();
                         $distrib_change->update();
+                        */
                     }
                     else {
                         $tab[] = array(
@@ -804,7 +1188,7 @@ class debugageController extends Controller
         //
         // AGREGE LE CUMUL AUX AYANTS DROITS
         //
-
+        /*
         $period = '2025-06';
         $personal_acaht = Achat::selectRaw('distributeur_id, sum(achats.pointvaleur) as new_achats, period')
             ->groupBy('achats.distributeur_id')
@@ -813,7 +1197,7 @@ class debugageController extends Controller
             ->get();
 
         foreach ($personal_acaht as $achat){
-            $level_achat = Level_current_test::where('distributeur_id', $achat->distributeur_id)->where('period', $period)->first();
+            $level_achat = LevelCurrent::where('distributeur_id', $achat->distributeur_id)->where('period', $period)->first();
 
             $level_achat->cumul_individuel = $level_achat->cumul_individuel + $achat->new_achats;
             $level_achat->new_cumul = $achat->new_achats;
@@ -863,7 +1247,7 @@ class debugageController extends Controller
         $period = '2024-11';
         $array = [];
         $eternalhelpers = new EternalHelper();
-        $level_10 = Level_current_test::selectRaw('COUNT(period) as nbr, period, distributeur_id, new_cumul, cumul_total')
+        $level_10 = LevelCurrent::selectRaw('COUNT(period) as nbr, period, distributeur_id, new_cumul, cumul_total')
             ->where('period', $period)
             ->groupBy('period')
             ->groupBy('distributeur_id')
@@ -873,7 +1257,7 @@ class debugageController extends Controller
         //return $level_10;
 
         foreach ($level_10 as $value) {
-            $control = Level_current_test::where('period', $period)->where('distributeur_id', $value->distributeur_id)->where('new_cumul', 0)->where('cumul_total', 0)->first();
+            $control = LevelCurrent::where('period', $period)->where('distributeur_id', $value->distributeur_id)->where('new_cumul', 0)->where('cumul_total', 0)->first();
             if($control){
                 $control->delete();
                 $tab[] = array(
@@ -889,15 +1273,15 @@ class debugageController extends Controller
             }
 
                 /*
-                $control = Level_current_test::where('period', '2024-02')->where('distributeur_id', $value->distributeur_id)->first();
+                $control = LevelCurrent::where('period', '2024-02')->where('distributeur_id', $value->distributeur_id)->first();
                 if($control){
-                    $delete = Level_current_test::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
+                    $delete = LevelCurrent::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
                     $delete->delete();
                     $array[] = $value->distributeur_id;
                     //return $array;
                 }
                 else {
-                    $delete = Level_current_test::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
+                    $delete = LevelCurrent::where('period', $period)->where('distributeur_id', $value->distributeur_id)->first();
                     $delete->period = '2024-02';
                     $delete->update();
                     $array[] = $value->distributeur_id;
@@ -924,7 +1308,7 @@ class debugageController extends Controller
         $eternalhelpers = new EternalHelper;
         $achat = Achat::selectRaw('period, SUM(pointvaleur) as new_achats, distributeur_id, id_distrib_parent')->where('period', $period)->groupby('distributeur_id')->get();
         foreach ($achat as $value) {
-            $level = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $value->period)->first();
+            $level = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $value->period)->first();
             if($value->new_achats > $level->new_cumul)
             {
                 $etoilesCountChildren = array_sum($eternalhelpers->getChildrenNetworkAdvance($level->distributeur_id, $level->etoiles, 1));
@@ -959,7 +1343,7 @@ class debugageController extends Controller
             //$array[] = array('periodAchat' => $period, 'cumul PV' => $pv, 'etoiles' => $etoiles, 'info' => $value);
             $addCumul[] = $eternalhelpers->addCumulToParainsDebug($value->id_distrib_parent, $pv, $period);
 
-            $level_u = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
+            $level_u = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
             $level_u->period = $period;
             $level_u->etoiles = $etoiles;
             $level_u->cumul_individuel = $pv;
@@ -971,7 +1355,7 @@ class debugageController extends Controller
         }
         else {
             $period = $level[0]->created_at->format('Y-m');
-            $level_u = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
+            $level_u = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
             $level_u->period = $period;
             $level_u->update();
             //$array[] = array('periodAchat' => $period, 'info' => $value);
@@ -995,8 +1379,8 @@ class debugageController extends Controller
         $tabRecap = [];
         $tabNegatif = []; // Tableau pour stocker les cas où $diff < 0
 
-        $levelsJan = Level_current_test::where('period', '2025-01')->get()->keyBy('distributeur_id');
-        $levelsFeb = Level_current_test::where('period', '2025-02')
+        $levelsJan = LevelCurrent::where('period', '2025-01')->get()->keyBy('distributeur_id');
+        $levelsFeb = LevelCurrent::where('period', '2025-02')
                     ->whereIn('distributeur_id', $levelsJan->keys())
                     ->select('distributeur_id', 'cumul_collectif', 'cumul_total') // Sélectionner explicitement les colonnes
                     ->get()
@@ -1031,8 +1415,8 @@ class debugageController extends Controller
         ];
         /*
 
-        $levelsJan = Level_current_test::where('period', '2025-01')->get()->keyBy('distributeur_id');
-        $levelsFeb = Level_current_test::where('period', '2025-02')
+        $levelsJan = LevelCurrent::where('period', '2025-01')->get()->keyBy('distributeur_id');
+        $levelsFeb = LevelCurrent::where('period', '2025-02')
                     ->whereIn('distributeur_id', $levelsJan->keys())
                     ->get()
                     ->keyBy('distributeur_id');
@@ -1056,14 +1440,14 @@ class debugageController extends Controller
                     ,2292818, 2292822, 2420001, 2420002, 2292826, 2420004, 2420005, 2420006, 2292586);
 
         foreach ($tab as $value) {
-            $level[] = Level_current_test::where('distributeur_id', $value)->get();
+            $level[] = LevelCurrent::where('distributeur_id', $value)->get();
         }
 
         return $level;
 
 
         $eternalhelpers = new EternalHelper;
-        $level = Level_current_test::where('distributeur_id')->where('period', 2025-02)->first();
+        $level = LevelCurrent::where('distributeur_id')->where('period', 2025-02)->first();
         foreach ($level as $value) {
             $achat = Achat::where('distributeur_id', $value->distributeur_id)->get();
             if(count($achat) > 0){
@@ -1073,7 +1457,7 @@ class debugageController extends Controller
                 //$array[] = array('periodAchat' => $period, 'cumul PV' => $pv, 'etoiles' => $etoiles, 'info' => $value);
                 $addCumul[] = $eternalhelpers->addCumulToParainsDebug($value->id_distrib_parent, $pv, $period);
 
-                $level_u = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
+                $level_u = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
                 $level_u->period = $period;
                 $level_u->etoiles = $etoiles;
                 $level_u->cumul_individuel = $pv;
@@ -1085,7 +1469,7 @@ class debugageController extends Controller
             }
             else {
                 $period = $level[0]->created_at->format('Y-m');
-                $level_u = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
+                $level_u = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', 0)->first();
                 $level_u->period = $period;
                 $level_u->update();
                 //$array[] = array('periodAchat' => $period, 'info' => $value);
@@ -1104,7 +1488,7 @@ class debugageController extends Controller
         /*
         foreach ($distributeurs as $value) {
             $array[] = $value->distributeur_id;
-            $delete = Level_current_test::where('distributeur_id', $value->distributeur_id);
+            $delete = LevelCurrent::where('distributeur_id', $value->distributeur_id);
             $delete->delete();
         }
 
@@ -1116,14 +1500,14 @@ class debugageController extends Controller
         $cumul = 0;
         //'3315208'
         //->skip(1000)->take(1000)
-        $level = Level_current_test::where('period', '2025-01')->where('distributeur_id', 3315208)->first();
-        $level_0 = Level_current_test::where('period', '2025-01')->where('id_distrib_parent', 3315208)->get();
+        $level = LevelCurrent::where('period', '2025-01')->where('distributeur_id', 3315208)->first();
+        $level_0 = LevelCurrent::where('period', '2025-01')->where('id_distrib_parent', 3315208)->get();
         return [$level_0->sum('cumul_collectif'), ($level_0->sum('cumul_collectif')-$level->cumul_collectif), $level_0];
         foreach ($level_0 as $value) {
-            $level_1 = Level_current_test::where('period', '2024-12')->where('id_distrib_parent', $value->distributeur_id)->get();
+            $level_1 = LevelCurrent::where('period', '2024-12')->where('id_distrib_parent', $value->distributeur_id)->get();
             foreach ($level_1 as $value) {
-                $level_perso = Level_current_test::where('period', '2024-12')->where('distributeur_id', $value->distributeur_id)->first();
-                $level_2 = Level_current_test::where('period', '2024-12')->where('id_distrib_parent', $value->distributeur_id)->get();
+                $level_perso = LevelCurrent::where('period', '2024-12')->where('distributeur_id', $value->distributeur_id)->first();
+                $level_2 = LevelCurrent::where('period', '2024-12')->where('id_distrib_parent', $value->distributeur_id)->get();
                 $cumul_collectif_2 = $level_2->sum('cumul_collectif');
                 $tab[] = [$cumul_collectif_2, $level_2];
             }
@@ -1134,7 +1518,7 @@ class debugageController extends Controller
         /*
         foreach ($level_9 as $level_9_valu) {
             /*
-            $level_05 = new Level_current_test();
+            $level_05 = new LevelCurrent();
             $level_05->rang = 0;
             $level_05->period = '2024-10';
             $level_05->distributeur_id = $level_9_valu->distributeur_id;
@@ -1156,7 +1540,7 @@ class debugageController extends Controller
         {
             foreach ($level as $val) {
                 $etoiles = $eternalhelpers->avancementGrade($val->distributeur_id, $val->etoiles, $val->cumul_individuel, $val->cumul_collectif);
-                $individus = Level_current_test::where('id', $val->id)->first();
+                $individus = LevelCurrent::where('id', $val->id)->first();
                 if($etoiles > $individus->etoiles){
                     /*
                     $individus->etoiles = $etoiles;
@@ -1187,7 +1571,7 @@ class debugageController extends Controller
             $eternalhelpers = new EternalHelper();
 
             foreach ($achats as $val) {
-                $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
+                $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
 
                 if($level->new_cumul == 0)
                 {
@@ -1229,7 +1613,7 @@ class debugageController extends Controller
                         $addnewcumuldiffere = $eternalhelpers->addNewCumulDiffere($val->distributeur_id, $val->new_achats, $periodup);
                         $etoiles = $eternalhelpers->avancementGrade($val->distributeur_id, $addnewcumuldiffere[0]['etoiles'], $addnewcumuldiffere[0]['cumul_individuel'], $addnewcumuldiffere[0]['cumul_collectif']);
 
-                        $levelInsert = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $periodup)->first();
+                        $levelInsert = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $periodup)->first();
                         $distrib = Distributeur::where('distributeur_id', $val->distributeur_id)->first();
 
                         if($etoiles > $levelInsert->etoiles)
@@ -1270,7 +1654,7 @@ class debugageController extends Controller
             $level_02[] = $value->distributeur_id;
         }
 
-        $comparatif2 = Level_current_test::where('period', '2024-08')->groupBy('distributeur_id')->get();
+        $comparatif2 = LevelCurrent::where('period', '2024-08')->groupBy('distributeur_id')->get();
         foreach ($comparatif2 as $value) {
             $level_03[] = $value->distributeur_id;
         }
@@ -1282,7 +1666,7 @@ class debugageController extends Controller
             $insert = Distributeur::where('distributeur_id', $value)->first();
             /*
             //return $insert->distributeur_id;
-            $level_05 = new Level_current_test();
+            $level_05 = new LevelCurrent();
             $level_05->rang = 0;
             $level_05->period = '2024-08';
             $level_05->distributeur_id = $insert->distributeur_id;
@@ -1301,7 +1685,7 @@ class debugageController extends Controller
                 foreach ($insert as $key => $valu) {
                     if($key == 1)
                     {
-                        $delete = Level_current_test::where('id', $insert[$key]['id'])->first();
+                        $delete = LevelCurrent::where('id', $insert[$key]['id'])->first();
                         //$delete->delete();
                     }
                 }
@@ -1312,11 +1696,11 @@ class debugageController extends Controller
         return 'done';/*$insert; //*/
 
         /*
-        $level_comp = Level_current_test::whereNotIn('distributeur_id', $level_02)->where('period', '2024-02')->groupBy('distributeur_id')->get();
+        $level_comp = LevelCurrent::whereNotIn('distributeur_id', $level_02)->where('period', '2024-02')->groupBy('distributeur_id')->get();
         return $level_comp;
         foreach ($level_comp as $value) {
             try {
-                Level_current_test::insert([
+                LevelCurrent::insert([
 
                     'distributeur_id' => $value->distributeur_id,
                     'period' => Carbon::parse($value->created_at)->format('Y-m'),
@@ -1345,7 +1729,7 @@ class debugageController extends Controller
         //return $level;
         foreach ($level as $val) {
 
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $val->period)->first();
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $val->period)->first();
             if($level) {
 
                 $individuel = $val->new_achats + $level->cumul_individuel;
@@ -1366,7 +1750,7 @@ class debugageController extends Controller
                 $eternals->addCumulToParainsDebug($val->id_distrib_parent, $val->new_achats, $val->period);
                 $etoiles = $eternals->avancementGrade($val->distributeur_id, 1, $val->new_achats, $val->new_achats);
 
-                $level_05 = new Level_current_test();
+                $level_05 = new LevelCurrent();
                 $level_05->rang = 0;
                 $level_05->period = $val->period;
                 $level_05->distributeur_id = $val->distributeur_id;
@@ -1401,7 +1785,7 @@ class debugageController extends Controller
 
         foreach ($level as $val) {
 
-            $levelad = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $val->period)->first();
+            $levelad = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $val->period)->first();
             $now = Carbon::now();
             $perioded = Carbon::createFromFormat('Y-m', $val->period);
             $nbturn =  $perioded->diffInMonths($now);
@@ -1413,7 +1797,7 @@ class debugageController extends Controller
                 {
                     $perioded = Carbon::createFromFormat('Y-m', $val->period);
                     $dated = $perioded->addMonths($i)->format('Y-m');
-                    $levelmodif = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $dated)->first();
+                    $levelmodif = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $dated)->first();
 
                     if($levelmodif) {
 
@@ -1434,7 +1818,7 @@ class debugageController extends Controller
                         );
                     } else {
 
-                        $level_05 = new Level_current_test();
+                        $level_05 = new LevelCurrent();
                         $level_05->rang = 0;
                         $level_05->period = $dated;
                         $level_05->distributeur_id = $val->distributeur_id;
@@ -1466,16 +1850,16 @@ class debugageController extends Controller
 
         /*/
 
-        $leveled = Level_current_test::where('etoiles', 5)->where('cumul_collectif', '>=', 20000)->where('period', $period)->get();
+        $leveled = LevelCurrent::where('etoiles', 5)->where('cumul_collectif', '>=', 20000)->where('period', $period)->get();
 
         foreach ($leveled as $value) {
             $achat_verif = Achat::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
             if($achat_verif)
             {
-                $verif = Level_current_test::selectRaw('period, sum(cumul_collectif) as collectif, COUNT(distributeur_id) as nbr')
+                $verif = LevelCurrent::selectRaw('period, sum(cumul_collectif) as collectif, COUNT(distributeur_id) as nbr')
                 ->where('id_distrib_parent', $value->distributeur_id)->where('period', $period)->first();
 
-                $netoyage = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+                $netoyage = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
 
                 if($verif) {
                     $cumul_individuel = $value->cumul_collectif - $verif->collectif;
@@ -1542,10 +1926,10 @@ class debugageController extends Controller
         return $tab;
         //
 
-        $levelDistribEtoilesCampare = Level_current_test::where('level_current_tests.period', '2024-11')
+        $levelDistribEtoilesCampare = LevelCurrent::where('LevelCurrents.period', '2024-11')
         ->join('distributeurs', function ($join) {
-            $join->on('distributeurs.distributeur_id', '=', 'level_current_tests.distributeur_id')
-            ->on('level_current_tests.etoiles', '>', 'distributeurs.etoiles_id');
+            $join->on('distributeurs.distributeur_id', '=', 'LevelCurrents.distributeur_id')
+            ->on('LevelCurrents.etoiles', '>', 'distributeurs.etoiles_id');
         })->get();
 
         foreach ($levelDistribEtoilesCampare as $value) {
@@ -1571,7 +1955,7 @@ class debugageController extends Controller
         $isit = 0;
         $tabRecap = [];
         $eternalhelpers = new EternalHelper();
-        $level_t = Level_current_test::where('distributeur_id', $id)->where('period', $period)->first();
+        $level_t = LevelCurrent::where('distributeur_id', $id)->where('period', $period)->first();
         $coutChildren = $eternalhelpers->getChildrenNetworkAdvance($level_t->distributeur_id, $level_t->etoiles, 1);
         $etoilesCountChildren = array_sum($coutChildren);
         $etoiles = $eternalhelpers->calculAvancementDistribDebug($level_t->distributeur_id, $level_t->etoiles, $level_t->cumul_individuel, $level_t->cumul_collectif, $etoilesCountChildren);
@@ -1582,12 +1966,12 @@ class debugageController extends Controller
             'count_enfants' => $coutChildren
         );
         /*
-        $achat = Achat::join('level_current_tests', 'level_current_tests.distributeur_id', '=', 'achats.distributeur_id')
+        $achat = Achat::join('LevelCurrents', 'LevelCurrents.distributeur_id', '=', 'achats.distributeur_id')
         ->groupBy('achats.distributeur_id')
         ->selectRaw('*, sum(achats.pointvaleur) as new_achat')
         ->where('achats.period', $period)
-        ->where('level_current_tests.period', $period)
-        //->where('level_current_tests.etoiles', 6)
+        ->where('LevelCurrents.period', $period)
+        //->where('LevelCurrents.etoiles', 6)
         //->toSql();
         ->get();
 
@@ -1620,7 +2004,7 @@ class debugageController extends Controller
             /*
             if($etoiles >= $value->etoiles)
             {
-                $level_own = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+                $level_own = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
                 $distrib_own = Distributeur::where('distributeur_id', $value->distributeur_id)->first();
                 $distrib_own->etoiles_id = $etoiles;
                 $distrib_own->update();
@@ -1633,8 +2017,8 @@ class debugageController extends Controller
         return $tabRecap;
 
 
-        $regul = Level_current_test::where('distributeur_id', $id)->where('period', $period)->first();
-        $cumulChildVerif = Level_current_test::selectRaw('sum(cumul_collectif) as childCollectif')->where('id_distrib_parent', $id)->where('period', $period)->get();
+        $regul = LevelCurrent::where('distributeur_id', $id)->where('period', $period)->first();
+        $cumulChildVerif = LevelCurrent::selectRaw('sum(cumul_collectif) as childCollectif')->where('id_distrib_parent', $id)->where('period', $period)->get();
 
         $cumul_individuel = $regul->cumul_collectif - $cumulChildVerif[0]->childCollectif;
         $etoiles_requis = Etoile::where('etoile_level', ( $regul->etoiles+1 ))->first();
@@ -1659,19 +2043,19 @@ class debugageController extends Controller
         /*
         $verif = [];
         /*
-        $all_level = Level_current_test::where('level_current_tests.period', $period)->join('level_current_tests as lct', function ($join) {
-            $join->on('lct.distributeur_id', '=', 'level_current_tests.distributeur_id')
+        $all_level = LevelCurrent::where('LevelCurrents.period', $period)->join('LevelCurrents as lct', function ($join) {
+            $join->on('lct.distributeur_id', '=', 'LevelCurrents.distributeur_id')
             ->where('lct.period', '2024-07')
-            ->where('level_current_tests.cumul_individuel', '>', 'lct.cumul_individuel')
-            ->where('level_current_tests.cumul_collectif', '>','cumul_collectif');
+            ->where('LevelCurrents.cumul_individuel', '>', 'lct.cumul_individuel')
+            ->where('LevelCurrents.cumul_collectif', '>','cumul_collectif');
         })->get();
 
         return $all_level;
         /*
-        $regul = Level_current_test::where('distributeur_id', '2273565')->where('period', $period)->first();
+        $regul = LevelCurrent::where('distributeur_id', '2273565')->where('period', $period)->first();
         //return $regul;
 
-        $chckCollectif = Level_current_test::where('distributeur_id', '2273565')->where('period', $period2)->first();
+        $chckCollectif = LevelCurrent::where('distributeur_id', '2273565')->where('period', $period2)->first();
         if($chckCollectif)
         {
             $cumul_individuel = $regul->cumul_individuel + $chckCollectif->cumul_individuel;
@@ -1684,7 +2068,7 @@ class debugageController extends Controller
                 $etoiles = $regul->etoiles;
             }
             /*
-            //$level_own = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+            //$level_own = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
             $chckCollectif->cumul_individuel = $cumul_individuel;
             $chckCollectif->cumul_collectif = $cumul_collectif;
             $chckCollectif->etoiles = $etoiles;
@@ -1704,17 +2088,17 @@ class debugageController extends Controller
 
         $etoiles = 3; $ligne = 0; $nbr = 0;
 
-        $all_level = Achat::distinct('distributeur_id')->where('achats.period', $period)->join('level_current_tests as lct', function ($join) {
+        $all_level = Achat::distinct('distributeur_id')->where('achats.period', $period)->join('LevelCurrents as lct', function ($join) {
             $join->on('lct.distributeur_id', '=', 'achats.distributeur_id')->where('lct.period', '2024-11')->where('lct.etoiles', '=','3');
         })->get(['lct.period', 'lct.distributeur_id', 'lct.etoiles']);
 
         //return $all_level;
 
         foreach ($all_level as $value) {
-            $level_own = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+            $level_own = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
             if($value->cumul_collectif >= 2500)
             {
-                $level = Level_current_test::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->where('etoiles', '>=', 3)->get();
+                $level = LevelCurrent::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->where('etoiles', '>=', 3)->get();
                 if(count($level) >= 2)
                 {
                     $level_own->etoiles = 4;
@@ -1726,7 +2110,7 @@ class debugageController extends Controller
                     );
                 }
                 else {
-                    $countChild = Level_current_test::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->get();
+                    $countChild = LevelCurrent::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->get();
                     foreach ($countChild as $value) {
                         $nbr = $this->getChilrenAvancement($value->distributeur_id, $etoiles, $period);
                         $tab[] = array(
@@ -1739,7 +2123,7 @@ class debugageController extends Controller
                 }
             }
             elseif($level_own->cumul_collectif >= 1250) {
-                $level = Level_current_test::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->where('etoiles', '>=', 2)->get();
+                $level = LevelCurrent::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->where('etoiles', '>=', 2)->get();
                 if(count($level) >= 3)
                 {
                     $level_own->etoiles = 4;
@@ -1751,7 +2135,7 @@ class debugageController extends Controller
                     );
                 }
                 else {
-                    $countChild = Level_current_test::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->get();
+                    $countChild = LevelCurrent::where('period', $period)->where('id_distrib_parent', $value->distributeur_id)->get();
                     foreach ($countChild as $value) {
                         $nbr = $this->getChilrenAvancement($value->distributeur_id, $etoiles, $period);
                         $tab[] = array(
@@ -1773,18 +2157,18 @@ class debugageController extends Controller
         /*
         // CONTROLE SI LE GRADE DE LA PERIOD PRECEDENTE EST INFERIEUR A LA PERIODE SUIVANTE - COMMENCE ICI
 
-        $level = Level_current_test::where('period', '2024-10')->where('etoiles', '<', function (Builder $query) {
-            $query->selectRaw('avg(i.etoiles)')->where('period', '2024-11')->from('level_current_tests as i');
+        $level = LevelCurrent::where('period', '2024-10')->where('etoiles', '<', function (Builder $query) {
+            $query->selectRaw('avg(i.etoiles)')->where('period', '2024-11')->from('LevelCurrents as i');
         })->where('distributeur_id', '=', 'i.distributeur_id')->get();
 
-        $level = Level_current_test::where('level_current_tests.period', '2024-10')->join('level_current_tests as lct', function ($join) {
-            $join->on('lct.distributeur_id', '=', 'level_current_tests.distributeur_id')->where('lct.period', '2024-11')->where('lct.etoiles', '<','level_current_tests.etoiles');
+        $level = LevelCurrent::where('LevelCurrents.period', '2024-10')->join('LevelCurrents as lct', function ($join) {
+            $join->on('lct.distributeur_id', '=', 'LevelCurrents.distributeur_id')->where('lct.period', '2024-11')->where('lct.etoiles', '<','LevelCurrents.etoiles');
         })->tosql();
 
         return $level;
 
         foreach ($level_10 as $value) {
-            $level_11 = Level_current_test::where('period', '2024-11')->where('distributeur_id', $value->distributeur_id)->where('etoiles','<', $value->etoiles)->first();
+            $level_11 = LevelCurrent::where('period', '2024-11')->where('distributeur_id', $value->distributeur_id)->where('etoiles','<', $value->etoiles)->first();
             if($level_11)
             {
                 $array[] = array(
@@ -1814,7 +2198,7 @@ class debugageController extends Controller
 
         /*
         $period = '2024-11';
-        $level = Level_current_test::selectRaw('SUM(cumul_total) as collectif')->where('id_distrib_parent', '2221830')->where('period', $period)->get();
+        $level = LevelCurrent::selectRaw('SUM(cumul_total) as collectif')->where('id_distrib_parent', '2221830')->where('period', $period)->get();
         return [$period, $level];
         /*
         // CONTROLE SI LE GRADE DE LA PERIOD PRECEDENTE EST INFERIEUR A LA PERIODE SUIVANTE - COMMENCE ICI
@@ -1823,7 +2207,7 @@ class debugageController extends Controller
         $etoiles = 4;
         $nbr = 0;
         $tab = [];
-        $level_10 = Level_current_test::where('distributeur_id', '2273806')->where('period', '2024-10')->first();
+        $level_10 = LevelCurrent::where('distributeur_id', '2273806')->where('period', '2024-10')->first();
         $parentDistributeurs = Distributeur::where('id_distrib_parent', '2273806')->get();
 
         foreach ($parentDistributeurs as $value) {
@@ -1840,15 +2224,15 @@ class debugageController extends Controller
         // CONTROLE SI LE CUMUL TOTAL DE LA PERIOD PRECEDENTE EST INFERIEUR CELUI DE LA PERIODE SUIVANTE - COMMENCE ICI
         /*
 
-        $level = Level_current_test::where('level_current_tests.period', '2024-11')->join('level_current_tests as lct', function ($join) {
-            $join->on('lct.distributeur_id', '=', 'level_current_tests.distributeur_id')->where('lct.period', '2024-10')->where('lct.cumul_collectif', '>','level_current_tests.cumul_collectif');
+        $level = LevelCurrent::where('LevelCurrents.period', '2024-11')->join('LevelCurrents as lct', function ($join) {
+            $join->on('lct.distributeur_id', '=', 'LevelCurrents.distributeur_id')->where('lct.period', '2024-10')->where('lct.cumul_collectif', '>','LevelCurrents.cumul_collectif');
         })->get();
 
         return ['ça marche', $level];
 
         $tab = [];
         foreach ($level as $value) {
-            $check = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', '2024-02')->first();
+            $check = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', '2024-02')->first();
             if($value->cumul_collectif > $check->cumul_collectif)
             {
                 if($check->cumul_total == 0)
@@ -1890,25 +2274,25 @@ class debugageController extends Controller
 
         try {
             $distribs = Distributeur::join(
-                    'level_current_tests',
+                    'LevelCurrents',
                     // --- CORRECTION : Revenir à la jointure sur le matricule ---
-                    'level_current_tests.distributeur_id',
+                    'LevelCurrents.distributeur_id',
                     '=',
                     'distributeurs.distributeur_id'
                     // --- FIN CORRECTION ---
                 )
                 ->select( // Garder les alias pour la clarté
                     'distributeurs.distributeur_id',
-                    'level_current_tests.etoiles',
+                    'LevelCurrents.etoiles',
                     'distributeurs.etoiles_id',
-                    'level_current_tests.cumul_individuel',
-                    'level_current_tests.cumul_collectif'
+                    'LevelCurrents.cumul_individuel',
+                    'LevelCurrents.cumul_collectif'
                     // 'distributeurs.id as distributeur_pk_id' // Optionnel
                 )
                 // Comparaison des niveaux d'étoiles
-                ->whereColumn('distributeurs.etoiles_id', '<', 'level_current_tests.etoiles')
+                ->whereColumn('distributeurs.etoiles_id', '<', 'LevelCurrents.etoiles')
                 // Filtrer par période
-                ->where('level_current_tests.period', $period)
+                ->where('LevelCurrents.period', $period)
                 ->get();
 
             // Logguer le nombre de résultats
@@ -1942,7 +2326,7 @@ class debugageController extends Controller
                 );
             }
             else {
-                $level_change = Level_current_test::where('distributeur_id', $distrib->distributeur_id)->where('period', $period)->first();
+                $level_change = LevelCurrent::where('distributeur_id', $distrib->distributeur_id)->where('period', $period)->first();
                 $level_change->etoiles = $newPotentialLevel;
                 $level_change->update();
                 $tab[] = array(
@@ -1962,7 +2346,7 @@ class debugageController extends Controller
         $period = '2024-06';
         $eternalhelpers = new EternalHelper();
 
-        $distribinfos = Level_current_test::where('period', $period)->get();
+        $distribinfos = LevelCurrent::where('period', $period)->get();
 
         foreach ($distribinfos as $key => $value) {
 
@@ -1984,11 +2368,11 @@ class debugageController extends Controller
         }
         return $tab;
         /*
-        $level_06 = Level_current_test::where('period', '2024-06')->get();
+        $level_06 = LevelCurrent::where('period', '2024-06')->get();
 
         foreach ($level_06 as $lev06) {
 
-                $level = new Level_current_test();
+                $level = new LevelCurrent();
                 $level->period = $period;
                 $level->distributeur_id = $lev06->distributeur_id;
                 $level->etoiles = 1;
@@ -2005,11 +2389,11 @@ class debugageController extends Controller
         //
         /*
 
-        $level_06 = Level_current_test::where('period', '2024-05')->offset(6000)->limit(2000)->get();
+        $level_06 = LevelCurrent::where('period', '2024-05')->offset(6000)->limit(2000)->get();
         //return $level_06;
         foreach ($level_06 as $value) {
 
-            $level_05 = Level_current_test::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
+            $level_05 = LevelCurrent::where('distributeur_id', $value->distributeur_id)->where('period', $period)->first();
             if($level_05)
             {
                 $level_05->etoiles = $value->etoiles;
@@ -2020,7 +2404,7 @@ class debugageController extends Controller
                 $level_05->update();
             }
             else{
-                $level_ = new Level_current_test();
+                $level_ = new LevelCurrent();
                 $level_->period = $period;
                 $level_->distributeur_id = $value->distributeur_id;
                 $level_->etoiles = 1;
@@ -2044,7 +2428,7 @@ class debugageController extends Controller
         //return $achat;
         foreach ($achat as $val) {
 
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
 
             if($level)
             {
@@ -2061,7 +2445,7 @@ class debugageController extends Controller
             else {
 
                 $etoiles = $eternalhelpers->avancementGrade($val->distributeur_id, 1, $val->new_achats, $val->new_achats);
-                $level_ = new Level_current_test();
+                $level_ = new LevelCurrent();
                 $level_->period = $period;
                 $level_->distributeur_id = $val->distributeur_id;
                 $level_->etoiles = $etoiles;
@@ -2085,10 +2469,10 @@ class debugageController extends Controller
                         ->get();
         //return $achat;
 
-        $lev = Level_current_test::where('period', $period)->get();
+        $lev = LevelCurrent::where('period', $period)->get();
 
         foreach ($lev as $val) {
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
             $etoiles = $eternalhelpers->avancementGrade($val->distributeur_id, $val->etoiles, $val->cumul_individuel, $val->cumul_collectif);
 
             $level->etoiles = $etoiles;
@@ -2118,7 +2502,7 @@ class debugageController extends Controller
         $eternalhelpers = new EternalHelper();
         foreach ($achats as $val) {
 
-            $level = Level_current_test::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
+            $level = LevelCurrent::where('distributeur_id', $val->distributeur_id)->where('period', $period)->first();
             if($level)
             {
                 $cumul_total = $val->new_achats;
@@ -2159,7 +2543,7 @@ class debugageController extends Controller
                 $levels->update();
 
                 try {
-                    Level_current_test::insert([
+                    LevelCurrent::insert([
                         'distributeur_id' => $levels->distributeur_id,
                         'period' => $period,
                         'rang' => 0,
@@ -2220,12 +2604,12 @@ class debugageController extends Controller
 
     public function comparatifTab($period1, $period2)
     {
-        $comparatif = Level_current_test::where('period', $period2)->get();
+        $comparatif = LevelCurrent::where('period', $period2)->get();
         foreach ($comparatif as $value) {
             $tab2[] = $value->distributeur_id;
         }
 
-        $level_comp = Level_current_test::where('period', $period1)->whereNotIn('distributeur_id', $tab2)->get();
+        $level_comp = LevelCurrent::where('period', $period1)->whereNotIn('distributeur_id', $tab2)->get();
         return $level_comp;
 
         foreach ($level_comp as $value) {
@@ -2238,7 +2622,7 @@ class debugageController extends Controller
                 $achat = Achat::selectRaw('sum(pointvaleur) as new_cumul')->where('distributeur_id', $value->distributeur_id)->where('period', $period2)->first();
                 if($achat) {
 
-                    $level_insert = new Level_current_test();
+                    $level_insert = new LevelCurrent();
                     $level_insert->period = $period2;
                     $level_insert->distributeur_id = $value->distributeur_id;
                     $level_insert->etoiles = $value->etoiles;
@@ -2274,7 +2658,7 @@ class debugageController extends Controller
             }
             /*
             try {
-                Level_current_test::insert([
+                LevelCurrent::insert([
 
                     'distributeur_id' => $value->distributeur_id,
                     'period' => Carbon::parse($value->created_at)->format('Y-m'),
@@ -2301,12 +2685,12 @@ class debugageController extends Controller
          $children = [];
 
         //$childinfos = Distributeur::join('levels', 'levels.distributeur_id', '=', 'distributeurs.distributeur_id')->get(['distributeurs.*', 'levels.*']);
-        $childDistributeurs = Level_current_test::where('distributeur_id', $parent)->where('period', $period)->get();
+        $childDistributeurs = LevelCurrent::where('distributeur_id', $parent)->where('period', $period)->get();
 
         foreach ($childDistributeurs as $child)
         {
             /*
-            $achatsInsert = Level_current_test::where('distributeur_id', $child->distributeur_id)->first();
+            $achatsInsert = LevelCurrent::where('distributeur_id', $child->distributeur_id)->first();
             $achatsInsert->cumul_total = $child->cumul_total + $cumul;
             $achatsInsert->cumul_collectif = $child->cumul_collectif + $cumul;
             $achatsInsert->update();
@@ -2354,8 +2738,8 @@ class debugageController extends Controller
         $total = 0;
         $reste = 0;
         $childDistributeurs = Distributeur::where('id_distrib_parent', $disitributeurId)->get();
-        $total = Level_current_test::selectRaw('SUM(cumul_collectif) as collectif')->where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
-        $level = Level_current_test::where('distributeur_id', $disitributeurId)->where('period', $period)->first();
+        $total = LevelCurrent::selectRaw('SUM(cumul_collectif) as collectif')->where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
+        $level = LevelCurrent::where('distributeur_id', $disitributeurId)->where('period', $period)->first();
         //return $level;
 
         $nbrChildren = count($childDistributeurs);
@@ -2379,7 +2763,7 @@ class debugageController extends Controller
                 );
             }
             /*
-            $updater = Level_current_test::where('distributeur_id', $disitributeurId)->where('period', $period)->first();
+            $updater = LevelCurrent::where('distributeur_id', $disitributeurId)->where('period', $period)->first();
             $updater->cumul_individuel = $reste;
             $updater->update();
             */
@@ -2534,7 +2918,7 @@ class debugageController extends Controller
     {
         $children = [];
 
-        $Level = Level_current_test::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
+        $Level = LevelCurrent::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
         if($Level->sum('cumul_collectif') > $cumul_collectif)
         {
             foreach ($Level as $child)
@@ -2671,11 +3055,11 @@ class debugageController extends Controller
         $nbr = 0;
         $count = [];
         //$children[] = $disitributeurId;
-        $parentDistributeurs = Level_current_test::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
+        $parentDistributeurs = LevelCurrent::where('id_distrib_parent', $disitributeurId)->where('period', $period)->get();
 
         foreach ($parentDistributeurs as $parent)
         {
-            $childDistributeurs = Level_current_test::where('id_distrib_parent', $parent->distributeur_id)->where('period', $period)->where('etoiles', '>=', $rang)->get();
+            $childDistributeurs = LevelCurrent::where('id_distrib_parent', $parent->distributeur_id)->where('period', $period)->where('etoiles', '>=', $rang)->get();
             $direct = $childDistributeurs->count();
             if($direct > 0){
                 $nbr = $nbr + $direct;

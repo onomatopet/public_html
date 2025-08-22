@@ -12,6 +12,7 @@ use Maatwebsite\Excel\Facades\Excel;
 use App\Exports\NetworkExport;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class NetworkExportController extends Controller
 {
@@ -196,12 +197,12 @@ class NetworkExportController extends Controller
     }
 
     /**
-     * Récupère les données du réseau avec support des archives
+     * Récupère les données du réseau avec support des archives - Organisé par pieds
      */
     private function getNetworkData($distributeurMatricule, $period, $tableName = 'level_currents')
     {
-        \Log::info("=== Début getNetworkData ===");
-        \Log::info("Distributeur Matricule: {$distributeurMatricule}, Période: {$period}, Table: {$tableName}");
+        Log::info("=== Début getNetworkData ===");
+        Log::info("Distributeur Matricule: {$distributeurMatricule}, Période: {$period}, Table: {$tableName}");
 
         // D'abord, obtenir l'ID primaire du distributeur principal
         $distributeurPrincipal = DB::table('distributeurs')
@@ -209,101 +210,156 @@ class NetworkExportController extends Controller
             ->first();
 
         if (!$distributeurPrincipal) {
-            \Log::error("Distributeur avec matricule {$distributeurMatricule} non trouvé");
+            Log::error("Distributeur avec matricule {$distributeurMatricule} non trouvé");
             return [];
         }
 
-        \Log::info("Distributeur principal trouvé - ID: {$distributeurPrincipal->id}, Nom: {$distributeurPrincipal->nom_distributeur}");
+        Log::info("Distributeur principal trouvé - ID: {$distributeurPrincipal->id}, Nom: {$distributeurPrincipal->nom_distributeur}");
 
-        // Initialiser
+        // Initialiser le réseau avec le distributeur principal
         $network = [];
-        $processedIds = []; // IDs primaires traités
-        $queue = [['id' => $distributeurPrincipal->id, 'matricule' => $distributeurPrincipal->distributeur_id, 'level' => 0]];
-        $limit = 5000;
 
-        while (!empty($queue) && count($network) < $limit) {
-            $current = array_shift($queue);
-            $currentId = $current['id']; // ID primaire
-            $currentMatricule = $current['matricule']; // Matricule
-            $currentLevel = $current['level'];
+        // Récupérer les données du distributeur principal
+        $principalData = $this->getDistributeurData($distributeurPrincipal->id, $period, $tableName, 0);
+        if ($principalData) {
+            $network[] = $principalData;
+        }
 
-            \Log::info("Traitement ID: {$currentId}, Matricule: {$currentMatricule}, Niveau: {$currentLevel}");
+        // Récupérer tous les enfants directs (les pieds) du distributeur principal
+        $pieds = DB::table('distributeurs')
+            ->where('id_distrib_parent', $distributeurPrincipal->id)
+            ->orderBy('id')
+            ->get();
 
-            // Éviter les doublons
-            if (in_array($currentId, $processedIds)) {
-                \Log::info("ID {$currentId} déjà traité");
-                continue;
+        Log::info("Nombre de pieds trouvés: " . $pieds->count());
+
+        $piedNumber = 1;
+        // Pour chaque pied, faire un parcours en profondeur complet
+        foreach ($pieds as $pied) {
+            Log::info("Traitement du pied {$piedNumber}: {$pied->distributeur_id} - {$pied->nom_distributeur}");
+
+            // Récupérer toute la lignée de ce pied
+            $lignee = $this->getCompleteLignee($pied->id, $period, $tableName, 1);
+
+            // Ajouter la lignée au réseau
+            foreach ($lignee as $membre) {
+                $network[] = $membre;
             }
-            $processedIds[] = $currentId;
 
-            // Récupérer les données avec la table appropriée (currents ou histories)
-            $data = DB::table('distributeurs as d')
-                ->leftJoin("{$tableName} as lc", function($join) use ($period) {
-                    $join->on('d.id', '=', 'lc.distributeur_id')
-                         ->where('lc.period', '=', $period);
-                })
-                ->leftJoin('distributeurs as parent', 'd.id_distrib_parent', '=', 'parent.id')
-                ->where('d.id', $currentId)
-                ->select([
-                    'd.id',
-                    'd.distributeur_id',
-                    'd.nom_distributeur',
-                    'd.pnom_distributeur',
-                    'd.id_distrib_parent',
-                    'd.etoiles_id',
-                    'parent.distributeur_id as parent_matricule',
-                    'parent.nom_distributeur as nom_parent',
-                    'parent.pnom_distributeur as pnom_parent',
-                    'lc.etoiles',
-                    'lc.new_cumul',
-                    'lc.cumul_total',
-                    'lc.cumul_collectif',
-                    'lc.cumul_individuel',
-                    'lc.rang'
-                ])
-                ->first();
+            // Ajouter les informations de sous-total pour ce pied
+            if (!empty($lignee)) {
+                $sousTotal = $this->calculateSousTotal($lignee, $pied, $piedNumber);
+                $network[] = $sousTotal;
+            }
 
-            if ($data) {
-                \Log::info("Données trouvées pour {$currentMatricule}: etoiles={$data->etoiles}, new_cumul={$data->new_cumul}, cumul_collectif={$data->cumul_collectif}");
+            $piedNumber++;
+        }
 
-                $network[] = [
-                    'rang' => $currentLevel,
-                    'distributeur_id' => $data->distributeur_id,
-                    'nom_distributeur' => $data->nom_distributeur ?? 'N/A',
-                    'pnom_distributeur' => $data->pnom_distributeur ?? 'N/A',
-                    'etoiles' => $data->etoiles ?? $data->etoiles_id ?? 0,
-                    'new_cumul' => $data->new_cumul ?? 0,
-                    'cumul_total' => $data->cumul_total ?? 0,
-                    'cumul_collectif' => $data->cumul_collectif ?? 0,
-                    'cumul_individuel' => $data->cumul_individuel ?? 0,
-                    'id_distrib_parent' => $data->parent_matricule ?? '',
-                    'nom_parent' => $data->nom_parent ?? 'N/A',
-                    'pnom_parent' => $data->pnom_parent ?? 'N/A',
-                ];
+        Log::info("=== Fin getNetworkData ===");
+        Log::info("Total: " . count($network) . " éléments (distributeurs + sous-totaux)");
 
-                // Chercher les enfants avec l'ID primaire du parent
-                $children = DB::table('distributeurs')
-                    ->where('id_distrib_parent', $currentId)
-                    ->get(['id', 'distributeur_id']);
+        return $network;
+    }
 
-                \Log::info("Nombre d'enfants trouvés pour ID {$currentId}: " . $children->count());
+    /**
+     * Récupère récursivement toute la lignée d'un distributeur (parcours en profondeur)
+     */
+    private function getCompleteLignee($distributeurId, $period, $tableName, $level)
+    {
+        $lignee = [];
 
-                foreach ($children as $child) {
-                    $queue[] = [
-                        'id' => $child->id,
-                        'matricule' => $child->distributeur_id,
-                        'level' => $currentLevel + 1
-                    ];
+        // Récupérer les données du distributeur actuel
+        $data = $this->getDistributeurData($distributeurId, $period, $tableName, $level);
+
+        if ($data) {
+            $lignee[] = $data;
+
+            // Récupérer tous ses enfants
+            $enfants = DB::table('distributeurs')
+                ->where('id_distrib_parent', $distributeurId)
+                ->orderBy('id')
+                ->get();
+
+            // Pour chaque enfant, récupérer sa lignée complète
+            foreach ($enfants as $enfant) {
+                $ligneEnfant = $this->getCompleteLignee($enfant->id, $period, $tableName, $level + 1);
+                foreach ($ligneEnfant as $membre) {
+                    $lignee[] = $membre;
                 }
-            } else {
-                \Log::warning("Aucune donnée trouvée pour ID {$currentId}");
             }
         }
 
-        \Log::info("=== Fin getNetworkData ===");
-        \Log::info("Total: " . count($network) . " distributeurs");
+        return $lignee;
+    }
 
-        return $network;
+    /**
+     * Récupère les données d'un distributeur spécifique
+     */
+    private function getDistributeurData($distributeurId, $period, $tableName, $level)
+    {
+        $data = DB::table('distributeurs as d')
+            ->leftJoin("{$tableName} as lc", function($join) use ($period) {
+                $join->on('d.id', '=', 'lc.distributeur_id')
+                     ->where('lc.period', '=', $period);
+            })
+            ->leftJoin('distributeurs as parent', 'd.id_distrib_parent', '=', 'parent.id')
+            ->where('d.id', $distributeurId)
+            ->select([
+                'd.id',
+                'd.distributeur_id',
+                'd.nom_distributeur',
+                'd.pnom_distributeur',
+                'd.id_distrib_parent',
+                'd.etoiles_id',
+                'parent.distributeur_id as parent_matricule',
+                'parent.nom_distributeur as nom_parent',
+                'parent.pnom_distributeur as pnom_parent',
+                'lc.etoiles',
+                'lc.new_cumul',
+                'lc.cumul_total',
+                'lc.cumul_collectif',
+                'lc.cumul_individuel',
+                'lc.rang'
+            ])
+            ->first();
+
+        if (!$data) {
+            return null;
+        }
+
+        return [
+            'type' => 'distributeur',
+            'rang' => $level,
+            'distributeur_id' => $data->distributeur_id,
+            'nom_distributeur' => $data->nom_distributeur ?? 'N/A',
+            'pnom_distributeur' => $data->pnom_distributeur ?? 'N/A',
+            'etoiles' => $data->etoiles ?? $data->etoiles_id ?? 0,
+            'new_cumul' => $data->new_cumul ?? 0,
+            'cumul_total' => $data->cumul_total ?? 0,
+            'cumul_collectif' => $data->cumul_collectif ?? 0,
+            'cumul_individuel' => $data->cumul_individuel ?? 0,
+            'id_distrib_parent' => $data->parent_matricule ?? '',
+            'nom_parent' => $data->nom_parent ?? 'N/A',
+            'pnom_parent' => $data->pnom_parent ?? 'N/A',
+        ];
+    }
+
+    /**
+     * Calcule le sous-total pour un pied
+     */
+    private function calculateSousTotal($lignee, $pied, $piedNumber)
+    {
+        $totalDistributeurs = count($lignee);
+        $totalPV = array_sum(array_column($lignee, 'cumul_collectif'));
+
+        return [
+            'type' => 'sous_total',
+            'pied_number' => $piedNumber,
+            'pied_name' => $pied->nom_distributeur . ' ' . $pied->pnom_distributeur,
+            'pied_id' => $pied->distributeur_id,
+            'total_distributeurs' => $totalDistributeurs,
+            'total_pv' => $totalPV
+        ];
     }
 
     /**
@@ -408,7 +464,7 @@ class NetworkExportController extends Controller
 
             return response()->json($groupedPeriods);
         } catch (\Exception $e) {
-            \Log::error('Erreur searchPeriods: ' . $e->getMessage());
+            Log::error('Erreur searchPeriods: ' . $e->getMessage());
             return response()->json([]);
         }
     }

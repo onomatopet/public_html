@@ -22,7 +22,7 @@ class SystemPeriod extends Model
         'closed_by_user_id',
         'closure_summary',
         'is_current',
-        // Nouveaux champs workflow
+        // Champs workflow
         'purchases_validated',
         'purchases_validated_at',
         'purchases_validated_by',
@@ -32,6 +32,9 @@ class SystemPeriod extends Model
         'advancements_calculated',
         'advancements_calculated_at',
         'advancements_calculated_by',
+        'bonus_calculated',
+        'bonus_calculated_at',
+        'bonus_calculated_by',
         'snapshot_created',
         'snapshot_created_at',
         'snapshot_created_by',
@@ -43,13 +46,15 @@ class SystemPeriod extends Model
         'closed_at' => 'date',
         'closure_summary' => 'array',
         'is_current' => 'boolean',
-        // Nouveaux casts workflow
+        // Casts workflow
         'purchases_validated' => 'boolean',
         'purchases_validated_at' => 'datetime',
         'purchases_aggregated' => 'boolean',
         'purchases_aggregated_at' => 'datetime',
         'advancements_calculated' => 'boolean',
         'advancements_calculated_at' => 'datetime',
+        'bonus_calculated' => 'boolean',
+        'bonus_calculated_at' => 'datetime',
         'snapshot_created' => 'boolean',
         'snapshot_created_at' => 'datetime',
     ];
@@ -60,7 +65,7 @@ class SystemPeriod extends Model
         return $this->belongsTo(User::class, 'closed_by_user_id');
     }
 
-    // Nouvelles relations workflow
+    // Relations workflow
     public function purchasesValidatedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'purchases_validated_by');
@@ -74,6 +79,11 @@ class SystemPeriod extends Model
     public function advancementsCalculatedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'advancements_calculated_by');
+    }
+
+    public function bonusCalculatedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'bonus_calculated_by');
     }
 
     public function snapshotCreatedBy(): BelongsTo
@@ -97,7 +107,7 @@ class SystemPeriod extends Model
         return $this->status === self::STATUS_OPEN;
     }
 
-    // Nouvelles méthodes workflow
+    // Méthode workflow principale (PAS DE DUPLICATION)
     public function getWorkflowStatus(): array
     {
         return [
@@ -106,6 +116,7 @@ class SystemPeriod extends Model
             'purchases_validated' => $this->purchases_validated,
             'purchases_aggregated' => $this->purchases_aggregated,
             'advancements_calculated' => $this->advancements_calculated,
+            'bonus_calculated' => $this->bonus_calculated,
             'snapshot_created' => $this->snapshot_created,
             'period_closed' => $this->status === self::STATUS_CLOSED,
         ];
@@ -137,10 +148,17 @@ class SystemPeriod extends Model
             && !$this->advancements_calculated;
     }
 
-    public function canCreateSnapshot(): bool
+    public function canCalculateBonus(): bool
     {
         return $this->status === self::STATUS_VALIDATION
             && $this->advancements_calculated
+            && !$this->bonus_calculated;
+    }
+
+    public function canCreateSnapshot(): bool
+    {
+        return $this->status === self::STATUS_VALIDATION
+            && $this->bonus_calculated
             && !$this->snapshot_created;
     }
 
@@ -150,17 +168,20 @@ class SystemPeriod extends Model
             && $this->snapshot_created;
     }
 
+    // Méthode getNextStep unique (PAS DE DUPLICATION)
     public function getNextStep(): ?string
     {
         if ($this->status === self::STATUS_OPEN) return 'start_validation';
         if (!$this->purchases_validated) return 'validate_purchases';
         if (!$this->purchases_aggregated) return 'aggregate_purchases';
         if (!$this->advancements_calculated) return 'calculate_advancements';
+        if (!$this->bonus_calculated) return 'calculate_bonus';
         if (!$this->snapshot_created) return 'create_snapshot';
         if ($this->status !== self::STATUS_CLOSED) return 'close_period';
         return null;
     }
 
+    // Méthode getNextStepLabel unique (PAS DE DUPLICATION)
     public function getNextStepLabel(): ?string
     {
         $step = $this->getNextStep();
@@ -169,6 +190,7 @@ class SystemPeriod extends Model
             'validate_purchases' => 'Valider les achats',
             'aggregate_purchases' => 'Agréger les achats',
             'calculate_advancements' => 'Calculer les avancements',
+            'calculate_bonus' => 'Calculer les bonus',
             'create_snapshot' => 'Créer le snapshot',
             'close_period' => 'Clôturer la période',
             default => null
@@ -193,6 +215,11 @@ class SystemPeriod extends Model
                 'advancements_calculated_at' => now(),
                 'advancements_calculated_by' => $userId,
             ],
+            'bonus_calculated' => [
+                'bonus_calculated' => true,
+                'bonus_calculated_at' => now(),
+                'bonus_calculated_by' => $userId,
+            ],
             'snapshot_created' => [
                 'snapshot_created' => true,
                 'snapshot_created_at' => now(),
@@ -204,6 +231,14 @@ class SystemPeriod extends Model
         if (!empty($updates)) {
             $this->update($updates);
         }
+    }
+
+    /**
+     * Met à jour le workflow pour l'étape bonus
+     */
+    public function markBonusCalculated(int $userId): void
+    {
+        $this->updateWorkflowStep('bonus_calculated', $userId);
     }
 
     /**
@@ -226,7 +261,7 @@ class SystemPeriod extends Model
      */
     public function canBeModified(): bool
     {
-        return $this->status !== 'closed';
+        return $this->status !== self::STATUS_CLOSED;
     }
 
     /**
@@ -234,7 +269,7 @@ class SystemPeriod extends Model
      */
     public function isInWorkflow(): bool
     {
-        return $this->status === 'active';
+        return $this->status === self::STATUS_VALIDATION;
     }
 
     /**
@@ -243,14 +278,13 @@ class SystemPeriod extends Model
     public function getCompletedStepsCount(): int
     {
         $count = 0;
+        $status = $this->getWorkflowStatus();
 
-        if ($this->status !== 'draft') $count++;
-        if ($this->status === 'active') $count++;
-        if ($this->purchases_validated) $count++;
-        if ($this->purchases_aggregated) $count++;
-        if ($this->advancements_calculated) $count++;
-        if ($this->snapshot_created) $count++;
-        if ($this->status === 'closed') $count++;
+        foreach ($status as $step) {
+            if ($step === true) {
+                $count++;
+            }
+        }
 
         return $count;
     }
@@ -260,6 +294,9 @@ class SystemPeriod extends Model
      */
     public function getProgressPercentage(): float
     {
-        return ($this->getCompletedStepsCount() / 7) * 100;
+        $totalSteps = count($this->getWorkflowStatus());
+        $completedSteps = $this->getCompletedStepsCount();
+
+        return $totalSteps > 0 ? ($completedSteps / $totalSteps) * 100 : 0;
     }
 }

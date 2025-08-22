@@ -4,7 +4,8 @@ namespace App\Services;
 
 use App\Models\SystemPeriod;
 use App\Models\Achat;
-use App\Models\Levelcurrent;
+use App\Models\LevelCurrent;
+use Illuminate\Support\Facades\DB;
 
 class WorkflowService
 {
@@ -136,8 +137,8 @@ class WorkflowService
      */
     protected function getAggregationStats(SystemPeriod $period): array
     {
-        $levelCurrents = Levelcurrent::where('period', $period->period)->count();
-        $totalNewCumul = Levelcurrent::where('period', $period->period)->sum('new_cumul');
+        $levelCurrents = LevelCurrent::where('period', $period->period)->count();
+        $totalNewCumul = LevelCurrent::where('period', $period->period)->sum('new_cumul');
 
         return [
             'distributeurs_impactes' => $levelCurrents,
@@ -151,7 +152,7 @@ class WorkflowService
     protected function getAdvancementStats(SystemPeriod $period): array
     {
         // Compter les avancements depuis la table historique
-        $avancements = \DB::table('avancement_history')
+        $avancements = \Illuminate\Support\Facades\DB::table('avancement_history')
             ->where('period', $period->period)
             ->selectRaw('
                 COUNT(*) as total,

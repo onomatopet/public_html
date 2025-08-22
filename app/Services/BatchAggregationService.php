@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Schema;
 
 class BatchAggregationService
 {
@@ -85,7 +86,8 @@ class BatchAggregationService
             DB::rollBack();
             Log::error("Erreur lors de l'agrégation batch", [
                 'period' => $period,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
 
             return [
@@ -97,15 +99,43 @@ class BatchAggregationService
 
     /**
      * Agrège les achats par distributeur pour la période
+     * CORRECTION: Utilise le bon nom de colonne 'statut' et adapte le filtre
      */
     protected function aggregatePurchases(string $period): Collection
     {
-        return Achat::where('period', $period)
-                   ->where('statut', 'validé') // Seulement les achats validés
-                   ->groupBy('distributeur_id')
-                   ->selectRaw('distributeur_id, SUM(points_unitaire_achat * qt) as total_points, SUM(montant_total_ligne) as total_montant, COUNT(*) as nb_achats')
-                   ->get()
-                   ->keyBy('distributeur_id');
+        // IMPORTANT: Vérifier d'abord quelle colonne utiliser pour les points
+        $pointColumn = Schema::hasColumn('achats', 'points_unitaire_achat')
+            ? 'points_unitaire_achat * qt'
+            : 'pointvaleur';
+
+        // Construction de la requête de base
+        $query = Achat::where('period', $period)
+                      ->groupBy('distributeur_id')
+                      ->selectRaw("distributeur_id, SUM($pointColumn) as total_points, SUM(montant_total_ligne) as total_montant, COUNT(*) as nb_achats");
+
+        // CORRECTION: Vérifier si la colonne 'statut' existe et appliquer le filtre approprié
+        if (Schema::hasColumn('achats', 'statut')) {
+            // Option 1: Filtrer uniquement les achats validés
+            // $query->where('statut', 'validé');
+
+            // Option 2: Filtrer tous les achats sauf ceux en attente
+            // $query->where('statut', '!=', 'pending');
+
+            // Option 3: Pas de filtre sur le statut (recommandé si les achats sont déjà validés avant l'agrégation)
+            // Ne rien faire ici
+
+            Log::info("Agrégation des achats sans filtre sur le statut pour inclure tous les achats de la période");
+        }
+
+        $result = $query->get()->keyBy('distributeur_id');
+
+        Log::info("Achats agrégés", [
+            'period' => $period,
+            'nb_distributeurs' => $result->count(),
+            'total_points' => $result->sum('total_points')
+        ]);
+
+        return $result;
     }
 
     /**
@@ -118,58 +148,78 @@ class BatchAggregationService
 
         // Récupérer les level_currents existants
         $existingLevels = LevelCurrent::where('period', $period)
-                                     ->whereIn('distributeur_id', $aggregatedPurchases->keys())
-                                     ->get()
-                                     ->keyBy('distributeur_id');
+                                    ->whereIn('distributeur_id', $aggregatedPurchases->keys())
+                                    ->get()
+                                    ->keyBy('distributeur_id');
 
-        // Préparer les données pour mise à jour/insertion
-        $toUpdate = [];
-        $toInsert = [];
+        // Traiter chaque distributeur avec des achats
+        foreach ($aggregatedPurchases->chunk($batchSize) as $chunk) {
+            $updateData = [];
+            $insertData = [];
 
-        foreach ($aggregatedPurchases as $distributeurId => $aggregate) {
-            if ($existingLevels->has($distributeurId)) {
-                // Mise à jour
-                $toUpdate[] = [
-                    'id' => $existingLevels[$distributeurId]->id,
-                    'new_cumul' => $aggregate->total_points,
-                    'cumul_individuel' => DB::raw("cumul_individuel + {$aggregate->total_points}"),
-                    'cumul_total' => $aggregate->total_points,
-                    'cumul_collectif' => DB::raw("cumul_collectif + {$aggregate->total_points}")
-                ];
-            } else {
-                // Insertion
-                $distributeur = Distributeur::find($distributeurId);
-                if ($distributeur) {
-                    $toInsert[] = [
+            foreach ($chunk as $distributeurId => $aggregate) {
+                $points = (float) $aggregate->total_points;
+
+                if ($existingLevels->has($distributeurId)) {
+                    // Mise à jour d'un enregistrement existant
+                    $updateData[] = [
                         'distributeur_id' => $distributeurId,
                         'period' => $period,
-                        'rang' => $distributeur->rang ?? 0,
-                        'etoiles' => $distributeur->etoiles_id ?? 1,
-                        'cumul_individuel' => $aggregate->total_points,
-                        'new_cumul' => $aggregate->total_points,
-                        'cumul_total' => $aggregate->total_points,
-                        'cumul_collectif' => $aggregate->total_points,
-                        'id_distrib_parent' => $distributeur->id_distrib_parent,
-                        'created_at' => now(),
-                        'updated_at' => now()
+                        'points' => $points
                     ];
+                } else {
+                    // Nouvelle insertion - récupérer les infos du distributeur
+                    $distributeur = Distributeur::find($distributeurId);
+                    if ($distributeur) {
+                        $insertData[] = [
+                            'distributeur_id' => $distributeurId,
+                            'period' => $period,
+                            'rang' => $distributeur->rang ?? 0,
+                            'etoiles' => $distributeur->etoiles_id ?? 1,
+                            'cumul_individuel' => $points,
+                            'new_cumul' => $points,
+                            'cumul_total' => $points,
+                            'cumul_collectif' => $points,
+                            'id_distrib_parent' => $distributeur->id_distrib_parent,
+                            'created_at' => now(),
+                            'updated_at' => now()
+                        ];
+                    }
                 }
             }
-        }
 
-        // Exécuter les mises à jour par batch
-        foreach (array_chunk($toUpdate, $batchSize) as $batch) {
-            foreach ($batch as $update) {
-                LevelCurrent::where('id', $update['id'])
-                          ->update(Arr::except($update, ['id']));  // Utiliser Arr::except
+            // Effectuer les mises à jour en batch
+            foreach ($updateData as $data) {
+                $existingLevel = $existingLevels[$data['distributeur_id']];
+
+                // IMPORTANT: new_cumul et cumul_total sont les valeurs du MOIS (remplacent)
+                $existingLevel->new_cumul = $data['points'];
+                $existingLevel->cumul_total = $data['points'];
+
+                // Les cumuls historiques sont incrémentés
+                $existingLevel->cumul_individuel += $data['points'];
+                $existingLevel->cumul_collectif += $data['points'];
+
+                $existingLevel->save();
                 $updates++;
-            }
-        }
 
-        // Exécuter les insertions par batch
-        foreach (array_chunk($toInsert, $batchSize) as $batch) {
-            LevelCurrent::insert($batch);
-            $inserts += count($batch);
+                Log::debug("Level current mis à jour", [
+                    'distributeur_id' => $data['distributeur_id'],
+                    'new_cumul' => $data['points'],
+                    'cumul_individuel' => $existingLevel->cumul_individuel,
+                    'cumul_collectif' => $existingLevel->cumul_collectif
+                ]);
+            }
+
+            // Effectuer les insertions en batch
+            if (!empty($insertData)) {
+                LevelCurrent::insert($insertData);
+                $inserts += count($insertData);
+
+                Log::debug("Nouveaux level currents insérés", [
+                    'count' => count($insertData)
+                ]);
+            }
         }
 
         return [
@@ -186,14 +236,25 @@ class BatchAggregationService
         $propagated = 0;
         $errors = 0;
 
+        Log::info("Début de la propagation des cumuls dans la hiérarchie", [
+            'period' => $period,
+            'nb_distributeurs' => $aggregatedPurchases->count()
+        ]);
+
         foreach ($aggregatedPurchases as $distributeurId => $aggregate) {
             try {
+                // Propager les points dans la chaîne parentale
                 $this->cumulService->propagateToParents(
                     $distributeurId,
                     $aggregate->total_points,
                     $period
                 );
                 $propagated++;
+
+                Log::debug("Cumul propagé pour distributeur", [
+                    'distributeur_id' => $distributeurId,
+                    'montant' => $aggregate->total_points
+                ]);
             } catch (\Exception $e) {
                 Log::error("Erreur propagation pour distributeur {$distributeurId}", [
                     'error' => $e->getMessage()
@@ -201,6 +262,11 @@ class BatchAggregationService
                 $errors++;
             }
         }
+
+        Log::info("Propagation terminée", [
+            'propagated' => $propagated,
+            'errors' => $errors
+        ]);
 
         return [
             'propagated' => $propagated,
@@ -257,5 +323,68 @@ class BatchAggregationService
                                                         ->get();
 
         return $report;
+    }
+
+    /**
+     * Vérifie l'intégrité des données après agrégation
+     */
+    public function verifyAggregationIntegrity(string $period): array
+    {
+        $issues = [];
+
+        // 1. Vérifier que tous les achats ont été agrégés
+        $achatsTotal = Achat::where('period', $period)
+                           ->sum(Schema::hasColumn('achats', 'points_unitaire_achat')
+                                 ? DB::raw('points_unitaire_achat * qt')
+                                 : 'pointvaleur');
+
+        $levelCurrentTotal = LevelCurrent::where('period', $period)
+                                        ->sum('new_cumul');
+
+        if (abs($achatsTotal - $levelCurrentTotal) > 0.01) {
+            $issues[] = [
+                'type' => 'total_mismatch',
+                'message' => "Différence entre total achats ({$achatsTotal}) et total level_currents ({$levelCurrentTotal})",
+                'severity' => 'high'
+            ];
+        }
+
+        // 2. Vérifier la cohérence des cumuls
+        $inconsistentCumuls = LevelCurrent::where('period', $period)
+                                         ->whereRaw('cumul_individuel < new_cumul')
+                                         ->count();
+
+        if ($inconsistentCumuls > 0) {
+            $issues[] = [
+                'type' => 'cumul_inconsistency',
+                'message' => "{$inconsistentCumuls} distributeurs ont un cumul_individuel inférieur à new_cumul",
+                'severity' => 'medium'
+            ];
+        }
+
+        // 3. Vérifier les distributeurs sans level_current malgré des achats
+        $distributeursWithoutLevel = Achat::where('period', $period)
+                                         ->whereNotIn('distributeur_id', function($query) use ($period) {
+                                             $query->select('distributeur_id')
+                                                   ->from('level_currents')
+                                                   ->where('period', $period);
+                                         })
+                                         ->distinct('distributeur_id')
+                                         ->count('distributeur_id');
+
+        if ($distributeursWithoutLevel > 0) {
+            $issues[] = [
+                'type' => 'missing_level_current',
+                'message' => "{$distributeursWithoutLevel} distributeurs ont des achats mais pas de level_current",
+                'severity' => 'high'
+            ];
+        }
+
+        return [
+            'period' => $period,
+            'integrity_check' => empty($issues) ? 'passed' : 'failed',
+            'issues' => $issues,
+            'checked_at' => now()->toISOString()
+        ];
     }
 }

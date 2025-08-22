@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 use Illuminate\Console\Command;
 use App\Models\LevelCurrent;
 use App\Models\Distributeur;
+use App\Models\AvancementHistory;
 use App\Services\EternalHelperLegacyMatriculeDB;
 use App\Services\GradeCalculator;
 use Illuminate\Support\Facades\DB;
@@ -12,9 +13,10 @@ use Illuminate\Support\Facades\Log;
 class RegularizeGrades extends Command
 {
     protected $signature = 'app:regularize-grades {period? : The period to regularize in YYYY-MM format}
-                                                           {--force : Skip confirmation}
-                                                           {--dry-run : Show changes without applying}
-                                                           {--batch-size=1000 : Process distributors in batches}';
+                                                  {--force : Skip confirmation}
+                                                  {--dry-run : Show changes without applying}
+                                                  {--batch-size=1000 : Process distributors in batches}
+                                                  {--user-id=0 : User ID for audit trail}';
 
     protected $description = 'Optimized grade regularization using bottom-up approach';
 
@@ -48,20 +50,16 @@ class RegularizeGrades extends Command
             $this->info("Loading all data...");
             $startTime = microtime(true);
 
-            // CORRECTION : Charger la hiérarchie complète avec les bons champs
+            // Charger tous les distributeurs avec leurs relations
             $allDistributors = Distributeur::select('id', 'distributeur_id', 'id_distrib_parent', 'etoiles_id')
                 ->get()
-                ->keyBy('distributeur_id'); // Indexer par matricule pour compatibilité
+                ->keyBy('id'); // Indexer par ID interne
 
-            // CORRECTION : Charger les données de niveau pour la période
+            // Charger les données de niveau pour la période
             $levelData = LevelCurrent::where('period', $period)
-                ->join('distributeurs', 'level_currents.distributeur_id', '=', 'distributeurs.id') // CORRECTION : Jointure par ID
-                ->select(
-                    'level_currents.*',
-                    'distributeurs.distributeur_id as matricule' // Récupérer le matricule
-                )
+                ->select('level_currents.*')
                 ->get()
-                ->keyBy('matricule'); // CORRECTION : Indexer par matricule
+                ->keyBy('distributeur_id'); // Indexer par distributeur_id (qui est l'ID interne)
 
             if ($levelData->isEmpty()) {
                 $this->warn("No data found for period {$period}");
@@ -77,7 +75,7 @@ class RegularizeGrades extends Command
 
             // 3. Traiter par niveaux (des feuilles vers la racine)
             $this->info("Processing distributors by hierarchy level...");
-            $updates = $this->processBottomUp($hierarchy, $levelData);
+            $updates = $this->processBottomUp($hierarchy, $levelData, $allDistributors);
 
             // 4. Afficher les résultats
             if (empty($updates)) {
@@ -104,66 +102,58 @@ class RegularizeGrades extends Command
 
         } catch (\Exception $e) {
             $this->error("Error: " . $e->getMessage());
-            Log::error("Grade regularization failed", ['error' => $e]);
+            Log::error("Grade regularization failed", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return self::FAILURE;
         }
     }
 
     /**
      * Construit la hiérarchie avec les niveaux de profondeur
-     * CORRECTION : Adaptation aux nouvelles structures ID/matricule
+     * Travaille avec les IDs internes
      */
     private function buildHierarchyWithLevels($allDistributors, $levelData): array
     {
         $hierarchy = [
-            'nodes' => [],      // [matricule => node_data]
-            'children' => [],   // [parent_matricule => [child_matricules]]
-            'levels' => [],     // [level => [matricules]]
+            'nodes' => [],      // [id => node_data]
+            'children' => [],   // [parent_id => [child_ids]]
+            'levels' => [],     // [level => [ids]]
             'max_level' => 0
         ];
 
-        // CORRECTION : Construire les relations parent-enfant avec conversion ID->matricule
+        // Construire les relations parent-enfant
         foreach ($allDistributors as $dist) {
-            $matricule = $dist->distributeur_id;
+            $id = $dist->id;
             $parentId = $dist->id_distrib_parent;
 
-            // CORRECTION : Trouver le matricule du parent à partir de son ID
-            $parentMatricule = null;
-            if ($parentId && $parentId != 0) {
-                foreach ($allDistributors as $potentialParent) {
-                    if ($potentialParent->id == $parentId) {
-                        $parentMatricule = $potentialParent->distributeur_id;
-                        break;
-                    }
-                }
-            }
-
             // Initialiser le nœud
-            $hierarchy['nodes'][$matricule] = [
-                'matricule' => $matricule,
-                'internal_id' => $dist->id, // AJOUT : Stocker l'ID interne
-                'parent' => $parentMatricule, // CORRECTION : Utiliser le matricule du parent
+            $hierarchy['nodes'][$id] = [
+                'id' => $id,
+                'matricule' => $dist->distributeur_id,
+                'parent_id' => $parentId && $parentId != 0 ? $parentId : null,
                 'level' => -1,  // Non calculé
-                'current_grade' => $levelData->has($matricule) ? $levelData->get($matricule)->etoiles : $dist->etoiles_id,
-                'cumul_individuel' => $levelData->has($matricule) ? $levelData->get($matricule)->cumul_individuel : 0,
-                'cumul_collectif' => $levelData->has($matricule) ? $levelData->get($matricule)->cumul_collectif : 0,
+                'current_grade' => $levelData->has($id) ? $levelData->get($id)->etoiles : $dist->etoiles_id,
+                'cumul_individuel' => $levelData->has($id) ? $levelData->get($id)->cumul_individuel : 0,
+                'cumul_collectif' => $levelData->has($id) ? $levelData->get($id)->cumul_collectif : 0,
             ];
 
             // Enregistrer la relation parent-enfant
-            if ($parentMatricule) {
-                if (!isset($hierarchy['children'][$parentMatricule])) {
-                    $hierarchy['children'][$parentMatricule] = [];
+            if ($parentId && $parentId != 0) {
+                if (!isset($hierarchy['children'][$parentId])) {
+                    $hierarchy['children'][$parentId] = [];
                 }
-                $hierarchy['children'][$parentMatricule][] = $matricule;
+                $hierarchy['children'][$parentId][] = $id;
             }
         }
 
         // Calculer les niveaux de profondeur (BFS depuis les racines)
         $queue = [];
-        foreach ($hierarchy['nodes'] as $matricule => $node) {
-            if (!$node['parent']) {
-                $queue[] = [$matricule, 0];
-                $hierarchy['nodes'][$matricule]['level'] = 0;
+        foreach ($hierarchy['nodes'] as $id => $node) {
+            if (!$node['parent_id']) {
+                $queue[] = [$id, 0];
+                $hierarchy['nodes'][$id]['level'] = 0;
             }
         }
 
@@ -193,13 +183,13 @@ class RegularizeGrades extends Command
     /**
      * Traite les distributeurs du bas vers le haut
      */
-    private function processBottomUp($hierarchy, $levelData): array
+    private function processBottomUp($hierarchy, $levelData, $allDistributors): array
     {
         $updates = [];
-        $processedGrades = []; // [matricule => calculated_grade]
+        $processedGrades = []; // [id => calculated_grade]
 
         // Créer une structure pour compter les branches qualifiées efficacement
-        $branchCounts = []; // [parent][grade] => count
+        $branchCounts = []; // [parent_id][grade] => count
 
         $progressBar = $this->output->createProgressBar(count($hierarchy['nodes']));
         $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %message%');
@@ -210,11 +200,11 @@ class RegularizeGrades extends Command
 
             $progressBar->setMessage("Processing level {$level}");
 
-            foreach ($hierarchy['levels'][$level] as $matricule) {
-                $node = $hierarchy['nodes'][$matricule];
+            foreach ($hierarchy['levels'][$level] as $id) {
+                $node = $hierarchy['nodes'][$id];
 
                 // Ne traiter que les distributeurs présents dans levelData
-                if (!$levelData->has($matricule)) {
+                if (!$levelData->has($id)) {
                     $progressBar->advance();
                     continue;
                 }
@@ -222,17 +212,17 @@ class RegularizeGrades extends Command
                 // Calculer le nouveau grade
                 $calculatedGrade = $this->calculateGradeWithCounts(
                     $node,
-                    $branchCounts[$matricule] ?? [],
+                    $branchCounts[$id] ?? [],
                     $processedGrades
                 );
 
-                $processedGrades[$matricule] = $calculatedGrade;
+                $processedGrades[$id] = $calculatedGrade;
 
                 // Enregistrer si changement
                 if ($calculatedGrade != $node['current_grade']) {
-                    $updates[$matricule] = [
-                        'internal_id' => $node['internal_id'], // AJOUT : Stocker l'ID interne
-                        'matricule' => $matricule,
+                    $updates[$id] = [
+                        'id' => $id,
+                        'matricule' => $node['matricule'],
                         'from' => $node['current_grade'],
                         'to' => $calculatedGrade,
                         'cumul_individuel' => $node['cumul_individuel'],
@@ -241,17 +231,17 @@ class RegularizeGrades extends Command
                 }
 
                 // Mettre à jour les compteurs de branches pour le parent
-                if ($node['parent']) {
-                    if (!isset($branchCounts[$node['parent']])) {
-                        $branchCounts[$node['parent']] = [];
+                if ($node['parent_id']) {
+                    if (!isset($branchCounts[$node['parent_id']])) {
+                        $branchCounts[$node['parent_id']] = [];
                     }
 
                     // Compter cette branche pour chaque grade atteint
                     for ($grade = 1; $grade <= $calculatedGrade; $grade++) {
-                        if (!isset($branchCounts[$node['parent']][$grade])) {
-                            $branchCounts[$node['parent']][$grade] = 0;
+                        if (!isset($branchCounts[$node['parent_id']][$grade])) {
+                            $branchCounts[$node['parent_id']][$grade] = 0;
                         }
-                        $branchCounts[$node['parent']][$grade]++;
+                        $branchCounts[$node['parent_id']][$grade]++;
                     }
                 }
 
@@ -279,7 +269,7 @@ class RegularizeGrades extends Command
         } elseif ($cumulIndividuel >= 100) {
             $baseGrade = 2;
         } else {
-            $baseGrade = 1;
+            $baseGrade = 1; // Grade minimum est 1 (Argent)
         }
 
         // Grade 4 avec cumul individuel
@@ -415,9 +405,10 @@ class RegularizeGrades extends Command
             }
 
             $this->table(
-                ['Matricule', 'From', 'To', 'Change', 'Cumul Ind.', 'Cumul Col.'],
-                collect($chunk)->map(fn($u, $m) => [
-                    $m,
+                ['ID', 'Matricule', 'From', 'To', 'Change', 'Cumul Ind.', 'Cumul Col.'],
+                collect($chunk)->map(fn($u) => [
+                    $u['id'],
+                    $u['matricule'],
                     $u['from'],
                     $u['to'],
                     $isPromotion ? '↑ +' . ($u['to'] - $u['from']) : '↓ -' . ($u['from'] - $u['to']),
@@ -437,7 +428,7 @@ class RegularizeGrades extends Command
 
         // Analyser les changements par type
         $changesByType = [];
-        foreach ($updates as $matricule => $update) {
+        foreach ($updates as $id => $update) {
             $key = $update['from'] . ' → ' . $update['to'];
             if (!isset($changesByType[$key])) {
                 $changesByType[$key] = [
@@ -449,7 +440,7 @@ class RegularizeGrades extends Command
             }
             $changesByType[$key]['count']++;
             if (count($changesByType[$key]['examples']) < 3) {
-                $changesByType[$key]['examples'][] = $matricule;
+                $changesByType[$key]['examples'][] = $update['matricule'];
             }
         }
 
@@ -498,7 +489,6 @@ class RegularizeGrades extends Command
 
     /**
      * Applique les mises à jour par batch
-     * CORRECTION : Adaptation aux nouvelles structures ID/matricule
      */
     private function applyBatchUpdates($updates, $period): void
     {
@@ -511,40 +501,35 @@ class RegularizeGrades extends Command
         DB::beginTransaction();
         try {
             foreach ($chunks as $chunk) {
-                // Préparer les mises à jour batch
-                $distributeurUpdates = [];
-                $levelUpdates = [];
+                foreach ($chunk as $id => $update) {
+                    // Mise à jour du distributeur
+                    Distributeur::where('id', $id)
+                              ->update(['etoiles_id' => $update['to']]);
 
-                foreach ($chunk as $matricule => $update) {
-                    // CORRECTION : Mise à jour distributeur par matricule
-                    $distributeurUpdates[] = [
-                        'distributeur_id' => $matricule,
-                        'etoiles_id' => $update['to']
-                    ];
+                    // Mise à jour de level_currents
+                    LevelCurrent::where('distributeur_id', $id)
+                                ->where('period', $period)
+                                ->update(['etoiles' => $update['to']]);
 
-                    // CORRECTION : Mise à jour level_currents par ID interne
-                    $levelUpdates[] = [
-                        'distributeur_id' => $update['internal_id'],
+                    // Créer l'historique d'avancement
+                    AvancementHistory::create([
                         'period' => $period,
-                        'etoiles' => $update['to']
-                    ];
+                        'distributeur_id' => $id,
+                        'ancien_grade' => $this->getGradeName($update['from']),
+                        'nouveau_grade' => $this->getGradeName($update['to']),
+                        'ancien_etoiles' => $update['from'],
+                        'nouveau_etoiles' => $update['to'],
+                        'type_calcul' => 'regularization',
+                        'motif' => 'Grade regularization bottom-up',
+                        'details' => json_encode([
+                            'cumul_individuel' => $update['cumul_individuel'],
+                            'cumul_collectif' => $update['cumul_collectif'],
+                            'command' => 'app:regularize-grades'
+                        ]),
+                        'created_by' => (int) $this->option('user-id'),
+                    ]);
 
                     $progressBar->advance();
-                }
-
-                // CORRECTION : Mise à jour batch pour distributeurs (par matricule)
-                if (!empty($distributeurUpdates)) {
-                    foreach ($distributeurUpdates as $upd) {
-                        Distributeur::where('distributeur_id', $upd['distributeur_id'])
-                                  ->update(['etoiles_id' => $upd['etoiles_id']]);
-                    }
-
-                    // CORRECTION : Mise à jour batch pour level_currents (par ID interne)
-                    DB::table('level_currents')->upsert(
-                        $levelUpdates,
-                        ['distributeur_id', 'period'],
-                        ['etoiles']
-                    );
                 }
             }
 
@@ -557,5 +542,28 @@ class RegularizeGrades extends Command
             DB::rollBack();
             throw $e;
         }
+    }
+
+    /**
+     * Obtient le nom du grade à partir du nombre d'étoiles
+     */
+    private function getGradeName($stars): string
+    {
+        $gradeMap = [
+            0 => 'Inscrit',
+            1 => 'Argent',
+            2 => 'Or',
+            3 => 'Platine',
+            4 => 'VIP',
+            5 => 'Elite',
+            6 => 'Elite Plus',
+            7 => 'Bronze',
+            8 => 'Silver',
+            9 => 'Gold',
+            10 => 'Platinum',
+            11 => 'Titanium'
+        ];
+
+        return $gradeMap[$stars] ?? 'Inconnu';
     }
 }

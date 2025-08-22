@@ -38,27 +38,60 @@ class DashboardController extends Controller
             $period = $availablePeriods->first() ?? date('Y-m');
         }
 
-        // 4. Récupérer les données du dashboard via le service
+        // 4. Calculer la période précédente
+        $previousPeriod = Carbon::createFromFormat('Y-m', $period)->subMonth()->format('Y-m');
+
+        // 5. Récupérer les données du dashboard via le service
         $dashboardData = $this->dashboardService->getDashboardData($period);
 
-        // 5. Statistiques générales
-        $stats = [
-            'total_distributeurs' => Distributeur::count(),
-            'active_distributeurs' => Distributeur::where('created_at', '>=', now()->subDays(30))->count(),
+        // 6. Statistiques générales avec comparaisons
+        // Pour Total Distributeurs : compter tous les distributeurs créés jusqu'à la fin du mois
+        $endOfCurrentMonth = Carbon::createFromFormat('Y-m', $period)->endOfMonth();
+        $endOfPreviousMonth = Carbon::createFromFormat('Y-m', $previousPeriod)->endOfMonth();
+
+        $currentStats = [
+            'total_distributeurs' => Distributeur::where('created_at', '<=', $endOfCurrentMonth)->count(),
             'total_achats' => Achat::where('period', $period)->count(),
-            // Utiliser points_unitaire_achat au lieu de point_achat
-            'revenue_month' => Achat::where('period', $period)
-                ->sum(DB::raw('points_unitaire_achat * qt')),
             'pending_modifications' => ModificationRequest::pending()->count(),
             'pending_deletions' => DeletionRequest::pending()->count(),
         ];
 
-        // 6. Données supplémentaires pour les graphiques
+        // 7. Statistiques du mois précédent pour comparaison
+        $previousStats = [
+            'total_distributeurs' => Distributeur::where('created_at', '<=', $endOfPreviousMonth)->count(),
+            'total_achats' => Achat::where('period', $previousPeriod)->count(),
+        ];
+
+        // 8. Calculer les pourcentages de changement et les différences absolues
+        $stats = [
+            'total_distributeurs' => [
+                'value' => $currentStats['total_distributeurs'],
+                'change' => $this->calculatePercentageChange(
+                    $previousStats['total_distributeurs'],
+                    $currentStats['total_distributeurs']
+                ),
+                'difference' => $currentStats['total_distributeurs'] - $previousStats['total_distributeurs'],
+                'previous_value' => $previousStats['total_distributeurs']
+            ],
+            'total_achats' => [
+                'value' => $currentStats['total_achats'],
+                'change' => $this->calculatePercentageChange(
+                    $previousStats['total_achats'],
+                    $currentStats['total_achats']
+                ),
+                'difference' => $currentStats['total_achats'] - $previousStats['total_achats'],
+                'previous_value' => $previousStats['total_achats']
+            ],
+            'pending_modifications' => $currentStats['pending_modifications'],
+            'pending_deletions' => $currentStats['pending_deletions'],
+        ];
+
+        // 9. Données supplémentaires pour les graphiques
         $monthlyRevenue = $this->getMonthlyRevenue();
         $topDistributeurs = $this->getTopDistributeurs($period);
         $recentActivities = $this->getRecentActivities();
 
-        // 7. Alertes système
+        // 10. Alertes système
         $alerts = $this->getSystemAlerts();
 
         return view('admin.dashboard.index', compact(
@@ -71,6 +104,18 @@ class DashboardController extends Controller
             'dashboardData',
             'alerts'
         ));
+    }
+
+    /**
+     * Calculer le pourcentage de changement entre deux valeurs
+     */
+    private function calculatePercentageChange($oldValue, $newValue)
+    {
+        if ($oldValue == 0) {
+            return $newValue > 0 ? 100 : 0;
+        }
+
+        return round((($newValue - $oldValue) / $oldValue) * 100, 1);
     }
 
     public function performance(Request $request)

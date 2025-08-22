@@ -1,14 +1,14 @@
 <?php
-// app/Services/SharedHostingCacheService.php
 
 namespace App\Services;
 
+use App\Contracts\CacheServiceInterface;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
-class SharedHostingCacheService
+class SharedHostingCacheService implements CacheServiceInterface
 {
     // Durées de cache
     const TTL_SHORT = 300;      // 5 minutes
@@ -99,5 +99,59 @@ class SharedHostingCacheService
         if (config('cache.default') === 'database') {
             DB::table('cache')->where('key', 'like', $pattern . '%')->delete();
         }
+    }
+
+    /**
+     * Invalide un cache spécifique
+     */
+    public function forget(string $key): void
+    {
+        Cache::forget($key);
+    }
+
+    /**
+     * Cache warming pour les données critiques
+     */
+    public function warmCache(string $period): void
+    {
+        Log::info("Starting cache warming (shared hosting) for period: {$period}");
+
+        // Préchauffer les statistiques globales
+        $this->warmGlobalStats($period);
+
+        // Préchauffer les métriques de base
+        $this->warmBasicMetrics($period);
+
+        Log::info("Cache warming completed for period: {$period}");
+    }
+
+    protected function warmGlobalStats(string $period): void
+    {
+        $key = self::PREFIX_STATS . "global:{$period}";
+        $this->remember($key, self::TTL_MEDIUM, function() use ($period) {
+            // Remplacer par la logique réelle adaptée
+            return [
+                'total_distributors' => DB::table('distributeurs')->count(),
+                'total_sales' => DB::table('achats')
+                    ->where('period', $period)
+                    ->sum('montant_total_ligne'),
+                'active_distributors' => DB::table('level_currents')
+                    ->where('period', $period)
+                    ->where('new_cumul', '>', 0)
+                    ->count()
+            ];
+        });
+    }
+
+    protected function warmBasicMetrics(string $period): void
+    {
+        $key = self::PREFIX_PERFORMANCE . "basic:{$period}";
+        $this->remember($key, self::TTL_SHORT, function() use ($period) {
+            return [
+                'cache_driver' => config('cache.default'),
+                'period' => $period,
+                'cached_at' => now()->toISOString()
+            ];
+        });
     }
 }

@@ -11,6 +11,9 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
 use App\Models\Achat;
 use App\Models\AvancementHistory;
+use App\Models\Distributeur;
+use App\Models\LevelCurrent;
+use App\Models\Bonus;
 use Symfony\Component\Console\Output\BufferedOutput;
 
 class ProcessController extends Controller
@@ -32,7 +35,48 @@ class ProcessController extends Controller
         // Statistiques du système
         $stats = $this->getSystemStats();
 
-        return view('admin.processes.index', compact('availablePeriods', 'currentPeriod', 'stats'));
+        // Historique récent des exécutions
+        $recentExecutions = $this->getRecentExecutions();
+
+        return view('admin.processes.index', compact('availablePeriods', 'currentPeriod', 'stats', 'recentExecutions'));
+    }
+
+    /**
+     * Affiche l'historique des processus
+     */
+    public function history(Request $request): View
+    {
+        $query = AvancementHistory::with('distributeur')
+            ->orderBy('date_avancement', 'desc');
+
+        // Filtres
+        if ($request->filled('period')) {
+            $query->where('period', $request->input('period'));
+        }
+
+        if ($request->filled('type_calcul')) {
+            $query->where('type_calcul', $request->input('type_calcul'));
+        }
+
+        if ($request->filled('date_from')) {
+            $query->whereDate('date_avancement', '>=', $request->input('date_from'));
+        }
+
+        if ($request->filled('date_to')) {
+            $query->whereDate('date_avancement', '<=', $request->input('date_to'));
+        }
+
+        $avancements = $query->paginate(50);
+
+        // Statistiques pour la période
+        $stats = $this->getHistoryStats($request);
+
+        // Périodes disponibles pour le filtre
+        $availablePeriods = AvancementHistory::distinct()
+            ->orderBy('period', 'desc')
+            ->pluck('period');
+
+        return view('admin.processes.history', compact('avancements', 'stats', 'availablePeriods'));
     }
 
     /**
@@ -74,6 +118,13 @@ class ProcessController extends Controller
                     $this->saveAdvancementsToHistory($period, $validatedOnly ? 'validated_only' : 'normal', $commandOutput);
                 }
 
+                // Enregistrer l'exécution
+                $this->logExecution('advancement', $period, 'success', [
+                    'dry_run' => $dryRun,
+                    'validated_only' => $validatedOnly,
+                    'output' => $commandOutput
+                ]);
+
                 Log::info("Processus d'avancement exécuté via interface web", [
                     'period' => $period,
                     'dry_run' => $dryRun,
@@ -86,6 +137,13 @@ class ProcessController extends Controller
                     ->with('success', $message)
                     ->with('command_output', $commandOutput);
             } else {
+                // Enregistrer l'échec
+                $this->logExecution('advancement', $period, 'failed', [
+                    'dry_run' => $dryRun,
+                    'validated_only' => $validatedOnly,
+                    'output' => $commandOutput
+                ]);
+
                 Log::error("Erreur lors de l'exécution du processus d'avancement", [
                     'period' => $period,
                     'dry_run' => $dryRun,
@@ -118,33 +176,46 @@ class ProcessController extends Controller
     {
         $request->validate([
             'period' => 'required|regex:/^\d{4}-\d{2}$/',
-            'audit_only' => 'nullable|boolean'
+            'dry_run' => 'nullable|boolean'  // ✅ Nom correct
         ]);
 
         $period = $request->input('period');
-        $auditOnly = $request->boolean('audit_only');
+        $dryRun = $request->boolean('dry_run');  // ✅ Nom correct
 
         try {
             // Capturer la sortie de la commande
             $output = new BufferedOutput();
 
-            // Exécuter la commande
-            $exitCode = Artisan::call('app:regularize-grades', [
+            // Préparer les paramètres de la commande
+            $params = [
                 'period' => $period,
-                '--audit-only' => $auditOnly,
                 '--force' => true
-            ], $output);
+            ];
+
+            // Ajouter l'option dry-run seulement si elle est cochée
+            if ($dryRun) {
+                $params['--dry-run'] = true;  // ✅ Utiliser le bon nom d'option
+            }
+
+            // Exécuter la commande
+            $exitCode = Artisan::call('app:regularize-grades', $params, $output);
 
             $commandOutput = $output->fetch();
 
             if ($exitCode === 0) {
-                $message = $auditOnly
-                    ? "Audit des grades terminé pour {$period}"
+                $message = $dryRun
+                    ? "Audit des grades terminé pour {$period} (mode test)"
                     : "Régularisation des grades appliquée pour {$period}";
+
+                // Enregistrer l'exécution
+                $this->logExecution('regularization', $period, 'success', [
+                    'dry_run' => $dryRun,
+                    'output' => $commandOutput
+                ]);
 
                 Log::info("Processus de régularisation exécuté via interface web", [
                     'period' => $period,
-                    'audit_only' => $auditOnly,
+                    'dry_run' => $dryRun,
                     'exit_code' => $exitCode,
                     'user_id' => Auth::id()
                 ]);
@@ -153,9 +224,15 @@ class ProcessController extends Controller
                     ->with('success', $message)
                     ->with('command_output', $commandOutput);
             } else {
+                // Enregistrer l'échec
+                $this->logExecution('regularization', $period, 'failed', [
+                    'dry_run' => $dryRun,
+                    'output' => $commandOutput
+                ]);
+
                 Log::error("Erreur lors de la régularisation", [
                     'period' => $period,
-                    'audit_only' => $auditOnly,
+                    'dry_run' => $dryRun,
                     'exit_code' => $exitCode,
                     'output' => $commandOutput
                 ]);
@@ -184,7 +261,6 @@ class ProcessController extends Controller
     {
         try {
             // Parser la sortie de la commande pour extraire les avancements
-            // Cette logique dépend du format de sortie de votre commande ProcessAdvancements
             $avancements = $this->parseAdvancementsFromOutput($commandOutput);
 
             foreach ($avancements as $avancement) {
@@ -198,7 +274,8 @@ class ProcessController extends Controller
                         'source' => 'interface_web',
                         'user_id' => Auth::id(),
                         'timestamp' => now()->toISOString(),
-                        'command_output_extract' => $avancement['details'] ?? null
+                        'command_output_extract' => $avancement['details'] ?? null,
+                        'matricule' => $avancement['matricule'] ?? null
                     ]
                 );
             }
@@ -220,24 +297,62 @@ class ProcessController extends Controller
 
     /**
      * Parse la sortie de la commande pour extraire les informations d'avancement
+     * Version améliorée qui s'adapte au format réel de ProcessAllDistributorAdvancements
      */
     private function parseAdvancementsFromOutput(string $output): array
     {
         $avancements = [];
 
-        // Cette méthode doit être adaptée selon le format exact de sortie de votre commande
-        // Exemple de parsing basique - à adapter selon le format réel
+        // Patterns pour détecter les promotions dans différents formats possibles
+        $patterns = [
+            // Format: "Promotion for ID:12345 (MAT001): Grade 2 -> 3"
+            '/Promotion for ID:(\d+) \(([A-Z0-9]+)\): Grade (\d+) -> (\d+)/i',
+
+            // Format: "Applying promotion: MAT001 from grade 2 to 3"
+            '/Applying promotion: ([A-Z0-9]+) from grade (\d+) to (\d+)/i',
+
+            // Format: "[PROMO] Distributeur #12345 (MAT001): 2 => 3"
+            '/\[PROMO\] Distributeur #(\d+) \(([A-Z0-9]+)\): (\d+) => (\d+)/i',
+
+            // Format générique pour détecter les changements de grade
+            '/(?:ID|#)(\d+).*?(?:grade|Grade|niveau).*?(\d+).*?(?:->|=>|to|vers).*?(\d+)/i'
+        ];
+
         $lines = explode("\n", $output);
 
         foreach ($lines as $line) {
-            // Exemple: chercher des lignes contenant des promotions
-            if (preg_match('/Promotion.*ID:(\d+).*Grade:(\d+)->(\d+)/', $line, $matches)) {
-                $avancements[] = [
-                    'distributeur_id' => (int)$matches[1],
-                    'ancien_grade' => (int)$matches[2],
-                    'nouveau_grade' => (int)$matches[3],
-                    'details' => trim($line)
-                ];
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $line, $matches)) {
+                    // Adapter selon le format détecté
+                    if (count($matches) === 5) { // Format avec ID et matricule
+                        $avancements[] = [
+                            'distributeur_id' => (int)$matches[1],
+                            'matricule' => $matches[2],
+                            'ancien_grade' => (int)$matches[3],
+                            'nouveau_grade' => (int)$matches[4],
+                            'details' => trim($line)
+                        ];
+                    } elseif (count($matches) === 4) { // Format sans ID ou sans matricule
+                        // Essayer de récupérer l'ID depuis le matricule si possible
+                        $matricule = is_numeric($matches[1]) ? null : $matches[1];
+                        $distributeur = null;
+
+                        if ($matricule) {
+                            $distributeur = Distributeur::where('distributeur_id', $matricule)->first();
+                        }
+
+                        if ($distributeur || is_numeric($matches[1])) {
+                            $avancements[] = [
+                                'distributeur_id' => $distributeur ? $distributeur->id : (int)$matches[1],
+                                'matricule' => $matricule,
+                                'ancien_grade' => (int)$matches[2],
+                                'nouveau_grade' => (int)$matches[3],
+                                'details' => trim($line)
+                            ];
+                        }
+                    }
+                    break; // Passer à la ligne suivante après avoir trouvé une correspondance
+                }
             }
         }
 
@@ -251,14 +366,18 @@ class ProcessController extends Controller
     {
         try {
             return [
-                'total_distributeurs' => \App\Models\Distributeur::count(),
-                'distributeurs_actifs_mois' => \App\Models\Distributeur::whereHas('achats', function($query) {
+                'total_distributeurs' => Distributeur::count(),
+                'distributeurs_actifs_mois' => Distributeur::whereHas('achats', function($query) {
                     $query->where('period', date('Y-m'));
                 })->count(),
                 'total_achats_mois' => Achat::where('period', date('Y-m'))->count(),
-                'total_bonus_mois' => \App\Models\Bonus::where('period', date('Y-m'))->count(),
+                'total_bonus_mois' => Bonus::where('period', date('Y-m'))->count(),
                 'periodes_disponibles' => Achat::select('period')->distinct()->count(),
-                'dernier_traitement' => \App\Models\LevelCurrent::latest('updated_at')->value('updated_at')
+                'dernier_traitement' => LevelCurrent::latest('updated_at')->value('updated_at'),
+
+                // Statistiques additionnelles
+                'avancements_mois' => AvancementHistory::where('period', date('Y-m'))->count(),
+                'total_points_mois' => LevelCurrent::where('period', date('Y-m'))->sum('cumul_individuel')
             ];
         } catch (\Exception $e) {
             Log::error("Erreur lors de la récupération des statistiques", [
@@ -271,9 +390,87 @@ class ProcessController extends Controller
                 'total_achats_mois' => 0,
                 'total_bonus_mois' => 0,
                 'periodes_disponibles' => 0,
-                'dernier_traitement' => null
+                'dernier_traitement' => null,
+                'avancements_mois' => 0,
+                'total_points_mois' => 0
             ];
         }
+    }
+
+    /**
+     * Récupère les statistiques de l'historique
+     */
+    private function getHistoryStats(Request $request): array
+    {
+        $query = AvancementHistory::query();
+
+        // Appliquer les mêmes filtres que pour l'historique
+        if ($request->filled('period')) {
+            $query->where('period', $request->input('period'));
+        }
+
+        if ($request->filled('type_calcul')) {
+            $query->where('type_calcul', $request->input('type_calcul'));
+        }
+
+        if ($request->filled('date_from')) {
+            $query->whereDate('date_avancement', '>=', $request->input('date_from'));
+        }
+
+        if ($request->filled('date_to')) {
+            $query->whereDate('date_avancement', '<=', $request->input('date_to'));
+        }
+
+        return [
+            'total' => $query->count(),
+            'promotions' => (clone $query)->whereColumn('nouveau_grade', '>', 'ancien_grade')->count(),
+            'demotions' => (clone $query)->whereColumn('nouveau_grade', '<', 'ancien_grade')->count(),
+            'par_type' => [
+                'normal' => (clone $query)->where('type_calcul', 'normal')->count(),
+                'validated_only' => (clone $query)->where('type_calcul', 'validated_only')->count()
+            ]
+        ];
+    }
+
+    /**
+     * Récupère les exécutions récentes
+     */
+    private function getRecentExecutions(): \Illuminate\Support\Collection
+    {
+        // Cette méthode pourrait lire depuis une table de logs ou depuis les logs Laravel
+        // Pour l'instant, on simule avec les données d'AvancementHistory
+        return AvancementHistory::select('period', 'type_calcul', 'created_at')
+            ->selectRaw('COUNT(*) as count')
+            ->groupBy('period', 'type_calcul', 'created_at')
+            ->orderBy('created_at', 'desc')
+            ->limit(10)
+            ->get()
+            ->map(function($item) {
+                return (object)[
+                    'type' => 'advancement',
+                    'period' => $item->period,
+                    'details' => "Type: {$item->type_calcul}, {$item->count} changements",
+                    'status' => 'success',
+                    'user' => Auth::user()->name ?? 'Système',
+                    'created_at' => $item->created_at
+                ];
+            });
+    }
+
+    /**
+     * Enregistre une exécution de processus
+     */
+    private function logExecution(string $type, string $period, string $status, array $details = []): void
+    {
+        // Cette méthode pourrait enregistrer dans une table dédiée
+        // Pour l'instant, on utilise les logs Laravel
+        Log::info("Process execution logged", [
+            'type' => $type,
+            'period' => $period,
+            'status' => $status,
+            'user_id' => Auth::id(),
+            'details' => $details
+        ]);
     }
 
     /**
